@@ -1,3 +1,4 @@
+import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import '../core/audio_config.dart';
@@ -9,7 +10,6 @@ class MethodChannelFlutterVoiceEngine extends FlutterVoiceEnginePlatform {
   @visibleForTesting
   final methodChannel = const MethodChannel('flutter_voice_engine');
   final eventChannel = const EventChannel('flutter_voice_engine/audio_chunk');
-  final errorChannel = const EventChannel('flutter_voice_engine/error');
 
   @override
   Future<void> initialize(
@@ -50,21 +50,19 @@ class MethodChannelFlutterVoiceEngine extends FlutterVoiceEnginePlatform {
   }
 
   @override
-  Future<void> setAudioChunkHandler(void Function(String) handler) async {
+  Future<void> setAudioChunkHandler(void Function(Uint8List) handler) async {
     eventChannel.receiveBroadcastStream().listen((data) {
-      if (data is String) handler(data);
+      print('MethodChannel: Received data type: ${data.runtimeType}');
+      if (data is Uint8List) {
+        print('MethodChannel: Received audio chunk, size: ${data.length} bytes');
+        handler(data);
+      } else {
+        print('MethodChannel: Invalid audio chunk data type: ${data.runtimeType}');
+      }
+    }, onError: (error) {
+      print('MethodChannel: Audio chunk stream error: $error');
+    }, onDone: () {
+      print('MethodChannel: Audio chunk stream closed');
     });
-  }
-
-  @override
-  Future<void> setErrorHandler(void Function(String) handler) async {
-    errorChannel.receiveBroadcastStream('error').listen((data) {
-      if (data is String) handler(data);
-    });
-  }
-
-  @override
-  Future<void> setInterruptionHandler(void Function() handler) async {
-    // Will be implemented in native side
   }
 }

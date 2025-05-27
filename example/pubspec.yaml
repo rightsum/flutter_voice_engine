@@ -17,6 +17,10 @@ dependencies:
   flutter:
     sdk: flutter
 
+  flutter_bloc: ^9.1.1
+  web_socket_channel: ^3.0.3
+
+
   flutter_voice_engine:
     # When depending on this package from a real application you should use:
     #   flutter_voice_engine: ^x.y.z

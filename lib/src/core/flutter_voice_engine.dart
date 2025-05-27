@@ -1,119 +1,110 @@
 import 'dart:async';
-import 'package:flutter/foundation.dart';
-import '../platform/flutter_voice_engine_platform_interface.dart';
+import 'dart:typed_data';
+import 'package:flutter/services.dart';
 import 'audio_config.dart';
 import 'audio_session_config.dart';
-import 'audio_processor.dart';
 
 class FlutterVoiceEngine {
-  FlutterVoiceEngine._(); // Private constructor for singleton
-  static final FlutterVoiceEngine _instance = FlutterVoiceEngine._();
-  factory FlutterVoiceEngine() => _instance;
+  static const MethodChannel _channel = MethodChannel('flutter_voice_engine');
+  static const EventChannel _audioChunkChannel = EventChannel('flutter_voice_engine/audio_chunk');
 
-  final _platform = FlutterVoiceEnginePlatform.instance;
-  AudioConfig _audioConfig = AudioConfig();
-  AudioSessionConfig _sessionConfig = AudioSessionConfig();
-  bool _isInitialized = false;
-  bool _isRecording = false;
-  bool _isPlaying = false;
-  StreamController<String>? _audioChunkController;
-  StreamController<String>? _errorController;
-  VoidCallback? _onInterruption;
+  AudioConfig audioConfig = AudioConfig();
+  AudioSessionConfig sessionConfig = AudioSessionConfig();
+  bool isInitialized = false;
+  bool isRecording = false;
 
-  // Getters
-  AudioConfig get audioConfig => _audioConfig;
-  AudioSessionConfig get sessionConfig => _sessionConfig;
-  bool get isInitialized => _isInitialized;
-  bool get isRecording => _isRecording;
-  bool get isPlaying => _isPlaying;
-  Stream<String> get audioChunkStream => _audioChunkController?.stream ?? const Stream.empty();
-  Stream<String> get errorStream => _errorController?.stream ?? const Stream.empty();
+  final _audioChunkController = StreamController<Uint8List>.broadcast();
 
-  // Setters
-  set audioConfig(AudioConfig config) {
-    if (_isInitialized) throw StateError('Cannot change config after initialization');
-    _audioConfig = config;
+  FlutterVoiceEngine() {
+    _audioChunkChannel.receiveBroadcastStream().listen(
+          (dynamic data) {
+        if (data is Uint8List) {
+          print('Flutter: Received audio chunk, size: ${data.length} bytes');
+          _audioChunkController.add(data);
+        } else {
+          print('Flutter: Invalid audio chunk data type: ${data.runtimeType}');
+        }
+      },
+      onError: (error) {
+        print('Flutter: Audio chunk stream error: $error');
+      },
+      onDone: () {
+        print('Flutter: Audio chunk stream closed');
+      },
+    );
   }
 
-  set sessionConfig(AudioSessionConfig config) {
-    if (_isInitialized) throw StateError('Cannot change session config after initialization');
-    _sessionConfig = config;
-  }
+  Stream<Uint8List> get audioChunkStream => _audioChunkController.stream;
 
-  set onInterruption(VoidCallback? callback) => _onInterruption = callback;
-
-  Future<void> initialize({List<AudioProcessor>? processors}) async {
-    if (_isInitialized) return;
+  Future<void> initialize() async {
     try {
-      await _platform.initialize(_audioConfig, _sessionConfig, processors ?? []);
-      _audioChunkController = StreamController.broadcast();
-      _errorController = StreamController.broadcast();
-      await _platform.setAudioChunkHandler((base64String) {
-        _audioChunkController?.add(base64String);
+      print('Flutter: Initializing VoiceEngine');
+      await _channel.invokeMethod('initialize', {
+        'audioConfig': audioConfig.toMap(),
+        'sessionConfig': sessionConfig.toMap(),
+        'processors': [],
       });
-      await _platform.setErrorHandler((error) {
-        _errorController?.add(error);
-      });
-      await _platform.setInterruptionHandler(() {
-        _onInterruption?.call();
-      });
-      _isInitialized = true;
+      isInitialized = true;
+      print('Flutter: VoiceEngine initialized');
     } catch (e) {
-      throw Exception('Failed to initialize FlutterVoiceEngine: $e');
+      isInitialized = false;
+      print('Flutter: Initialization failed: $e');
+      rethrow;
     }
   }
 
   Future<void> startRecording() async {
-    if (!_isInitialized) throw StateError('FlutterVoiceEngine not initialized');
-    if (_isRecording) return;
-    try {
-      await _platform.startRecording();
-      _isRecording = true;
-    } catch (e) {
-      throw Exception('Failed to start recording: $e');
+    if (!isInitialized) {
+      throw Exception('VoiceEngine not initialized');
     }
+    print('Flutter: Starting recording');
+    await _channel.invokeMethod('startRecording');
+    isRecording = true;
   }
 
   Future<void> stopRecording() async {
-    if (!_isRecording) return;
-    try {
-      await _platform.stopRecording();
-      _isRecording = false;
-    } catch (e) {
-      throw Exception('Failed to stop recording: $e');
+    if (!isInitialized || !isRecording) {
+      print('Flutter: Not recording or not initialized');
+      return;
     }
+    print('Flutter: Stopping recording');
+    await _channel.invokeMethod('stopRecording');
+    isRecording = false;
   }
 
-  Future<void> playAudioChunk(String base64String) async {
-    if (!_isInitialized) throw StateError('FlutterVoiceEngine not initialized');
+  Future<void> playAudioChunk(Uint8List audioData) async {
+    if (!isInitialized) {
+      throw Exception('VoiceEngine not initialized');
+    }
     try {
-      await _platform.playAudioChunk(base64String);
-      _isPlaying = true;
+      print('Flutter: Playing audio chunk, size: ${audioData.length} bytes');
+      await _channel.invokeMethod('playAudioChunk', {
+        'audioData': audioData,
+      });
     } catch (e) {
-      throw Exception('Failed to play audio chunk: $e');
+      print('Flutter: Playback failed: $e');
+      rethrow;
     }
   }
 
   Future<void> stopPlayback() async {
-    if (!_isPlaying) return;
-    try {
-      await _platform.stopPlayback();
-      _isPlaying = false;
-    } catch (e) {
-      throw Exception('Failed to stop playback: $e');
+    if (!isInitialized) {
+      print('Flutter: Not initialized');
+      return;
     }
+    print('Flutter: Stopping playback');
+    await _channel.invokeMethod('stopPlayback');
   }
 
   Future<void> shutdown() async {
-    try {
-      await _platform.shutdown();
-      await _audioChunkController?.close();
-      await _errorController?.close();
-      _isInitialized = false;
-      _isRecording = false;
-      _isPlaying = false;
-    } catch (e) {
-      throw Exception('Failed to shutdown FlutterVoiceEngine: $e');
+    if (!isInitialized) {
+      print('Flutter: Not initialized');
+      return;
     }
+    print('Flutter: Shutting down VoiceEngine');
+    await _channel.invokeMethod('shutdown');
+    isInitialized = false;
+    isRecording = false;
+    await _audioChunkController.close();
   }
 }

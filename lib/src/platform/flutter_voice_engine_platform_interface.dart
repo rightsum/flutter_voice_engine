@@ -1,3 +1,4 @@
+import 'dart:typed_data';
 import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 import '../core/audio_config.dart';
 import '../core/audio_session_config.dart';
@@ -42,12 +43,8 @@ abstract class FlutterVoiceEnginePlatform extends PlatformInterface {
     throw UnimplementedError('shutdown() has not been implemented.');
   }
 
-  Future<void> setAudioChunkHandler(void Function(String) handler) {
+  Future<void> setAudioChunkHandler(void Function(Uint8List) handler) {
     throw UnimplementedError('setAudioChunkHandler() has not been implemented.');
-  }
-
-  Future<void> setErrorHandler(void Function(String) handler) {
-    throw UnimplementedError('setErrorHandler() has not been implemented.');
   }
 
   Future<void> setInterruptionHandler(void Function() handler) {
