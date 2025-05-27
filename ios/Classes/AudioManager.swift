@@ -17,35 +17,37 @@ public class AudioManager {
     private let enableAEC: Bool
     private var cancellables = Set<AnyCancellable>()
 
-public init(
-    channels: UInt32 = 1,
-    sampleRate: Double = 48000,
-    bitDepth: Int = 16,
-    bufferSize: Int = 4096,
-    amplitudeThreshold: Float = 0.05,
-    enableAEC: Bool = true
-) {
-    self.inputFormat = AVAudioFormat(
-        commonFormat: .pcmFormatFloat32,
-        sampleRate: sampleRate,
-        channels: channels,
-        interleaved: true
-    )!
-    self.outputFormat = AVAudioFormat(
-        commonFormat: .pcmFormatFloat32,
-        sampleRate: sampleRate,
-        channels: 2,
-        interleaved: false
-    )!
-    self.targetFormat = AVAudioFormat(
-        commonFormat: bitDepth == 16 ? .pcmFormatInt16 : .pcmFormatFloat32,
-        sampleRate: sampleRate,
-        channels: channels,
-        interleaved: true
-    )!
-    self.amplitudeThreshold = amplitudeThreshold
-    self.enableAEC = enableAEC
-}
+    public init(
+            channels: UInt32 = 1,
+            sampleRate: Double = 48000,
+            bitDepth: Int = 16,
+            bufferSize: Int = 4096,
+            amplitudeThreshold: Float = 0.05,
+            enableAEC: Bool = true
+        ) {
+            // Define formats
+            self.inputFormat = AVAudioFormat(
+                commonFormat: .pcmFormatFloat32,
+                sampleRate: sampleRate,
+                channels: channels,
+                interleaved: true
+            )!
+            self.outputFormat = AVAudioFormat(
+                commonFormat: .pcmFormatFloat32,
+                sampleRate: sampleRate,
+                channels: 2, // Stereo output
+                interleaved: false
+            )!
+            self.targetFormat = AVAudioFormat(
+                commonFormat: .pcmFormatInt16,
+                sampleRate: 24000,
+                channels: channels,
+                interleaved: true
+            )!
+            self.amplitudeThreshold = amplitudeThreshold
+            self.enableAEC = enableAEC
+            setupConverters()
+        }
 
 public func setupAudioSession(
     category: AVAudioSession.Category,
@@ -82,13 +84,13 @@ public func setupAudioSession(
     }
 }
 
-private func setupConverters() {
-    recordingConverter = AVAudioConverter(from: inputFormat, to: targetFormat)
-    playbackConverter = AVAudioConverter(from: targetFormat, to: outputFormat)
-    if recordingConverter == nil || playbackConverter == nil {
-        errorPublisher.send("Failed to initialize audio converters")
+    private func setupConverters() {
+        recordingConverter = AVAudioConverter(from: inputFormat, to: targetFormat)
+        playbackConverter = AVAudioConverter(from: targetFormat, to: outputFormat)
+        if recordingConverter == nil || playbackConverter == nil {
+            errorPublisher.send("Failed to initialize audio converters")
+        }
     }
-}
 
 public func setupEngine() throws {
     audioEngine.attach(playerNode)
@@ -150,45 +152,51 @@ public func stopRecording() {
     audioChunkPublisher.send(completion: .finished)
 }
 
-public func playAudioChunk(base64String: String) throws {
-    guard audioEngine.isRunning, let converter = playbackConverter else {
-        throw NSError(domain: "AudioManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "Audio engine not running or playback converter unavailable"])
-    }
-    guard let data = Data(base64Encoded: base64String) else {
-        throw NSError(domain: "AudioManager", code: -2, userInfo: [NSLocalizedDescriptionKey: "Failed to decode Base64 audio chunk"])
-    }
-    let frameCount = AVAudioFrameCount(data.count / (targetFormat.commonFormat == .pcmFormatInt16 ? MemoryLayout<Int16>.size : MemoryLayout<Float>.size))
-    guard let inputBuffer = AVAudioPCMBuffer(pcmFormat: converter.inputFormat, frameCapacity: frameCount) else {
-        throw NSError(domain: "AudioManager", code: -3, userInfo: [NSLocalizedDescriptionKey: "Failed to create input buffer"])
-    }
-    inputBuffer.frameLength = frameCount
-    data.withUnsafeBytes { rawBuffer in
-        if targetFormat.commonFormat == .pcmFormatInt16 {
-            inputBuffer.int16ChannelData?.pointee.assign(from: rawBuffer.baseAddress!.assumingMemoryBound(to: Int16.self), count: Int(frameCount))
-        } else {
-            inputBuffer.floatChannelData?.pointee.assign(from: rawBuffer.baseAddress!.assumingMemoryBound(to: Float.self), count: Int(frameCount))
+    public func playAudioChunk(base64String: String) throws {
+            guard audioEngine.isRunning, let converter = playbackConverter else {
+                throw NSError(domain: "AudioManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "Audio engine not running or playback converter unavailable"])
+            }
+            guard let data = Data(base64Encoded: base64String) else {
+                throw NSError(domain: "AudioManager", code: -2, userInfo: [NSLocalizedDescriptionKey: "Failed to decode Base64 audio chunk"])
+            }
+            print("Received playback chunk, size: \(data.count) bytes")
+
+            // Calculate frame count for mono input (PCM16, 1 channel)
+            let frameCount = AVAudioFrameCount(data.count / MemoryLayout<Int16>.size)
+            guard let inputBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: frameCount) else {
+                throw NSError(domain: "AudioManager", code: -3, userInfo: [NSLocalizedDescriptionKey: "Failed to create input buffer"])
+            }
+            inputBuffer.frameLength = frameCount
+            data.withUnsafeBytes { rawBuffer in
+                inputBuffer.int16ChannelData?.pointee.assign(from: rawBuffer.baseAddress!.assumingMemoryBound(to: Int16.self), count: Int(frameCount))
+            }
+
+            // Create output buffer for stereo (Float32, 2 channels)
+            let outputFrameCapacity = UInt32(round(Double(frameCount) * outputFormat.sampleRate / targetFormat.sampleRate))
+            guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: AVAudioFrameCount(outputFrameCapacity)) else {
+                throw NSError(domain: "AudioManager", code: -4, userInfo: [NSLocalizedDescriptionKey: "Failed to create output buffer"])
+            }
+
+            // Convert mono to stereo
+            var error: NSError?
+            let status = converter.convert(to: outputBuffer, error: &error) { _, outStatus in
+                outStatus.pointee = .haveData
+                return inputBuffer
+            }
+            if let error = error {
+                throw error
+            }
+            if status == .error {
+                throw NSError(domain: "AudioManager", code: -5, userInfo: [NSLocalizedDescriptionKey: "Playback conversion failed"])
+            }
+
+            // Schedule buffer with correct format
+            playerNode.scheduleBuffer(outputBuffer, completionHandler: nil)
+            if !playerNode.isPlaying {
+                playerNode.play()
+            }
+            print("Scheduled playback buffer: \(outputBuffer.format), frames: \(outputBuffer.frameLength)")
         }
-    }
-    let outputFrameCapacity = UInt32(round(Double(frameCount) * converter.outputFormat.sampleRate / converter.inputFormat.sampleRate))
-    guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: converter.outputFormat, frameCapacity: AVAudioFrameCount(outputFrameCapacity)) else {
-        throw NSError(domain: "AudioManager", code: -4, userInfo: [NSLocalizedDescriptionKey: "Failed to create output buffer"])
-    }
-    var error: NSError?
-    let status = converter.convert(to: outputBuffer, error: &error) { _, outStatus in
-        outStatus.pointee = .haveData
-        return inputBuffer
-    }
-    if let error = error {
-        throw error
-    }
-    if status == .error {
-        throw NSError(domain: "AudioManager", code: -5, userInfo: [NSLocalizedDescriptionKey: "Playback conversion failed"])
-    }
-    playerNode.scheduleBuffer(outputBuffer, completionHandler: nil)
-    if !playerNode.isPlaying {
-        playerNode.play()
-    }
-}
 
 public func stopPlayback() {
     playerNode.stop()
