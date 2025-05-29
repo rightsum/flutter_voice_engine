@@ -20,6 +20,7 @@ public class FlutterVoiceEnginePlugin: NSObject, FlutterPlugin, FlutterStreamHan
         audioManager = AudioManager()
         super.init()
         setupInterruptionObserver()
+        setupConfigurationChangeObserver()
     }
 
     private func setupInterruptionObserver() {
@@ -28,6 +29,15 @@ public class FlutterVoiceEnginePlugin: NSObject, FlutterPlugin, FlutterStreamHan
             selector: #selector(handleInterruption),
             name: AVAudioSession.interruptionNotification,
             object: AVAudioSession.sharedInstance()
+        )
+    }
+
+    private func setupConfigurationChangeObserver() {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleAudioEngineConfigurationChange),
+            name: NSNotification.Name.AVAudioEngineConfigurationChange,
+            object: nil
         )
     }
 
@@ -41,6 +51,10 @@ public class FlutterVoiceEnginePlugin: NSObject, FlutterPlugin, FlutterStreamHan
             audioManager.stopPlayback()
             interruptionHandler?()
         }
+    }
+
+    @objc private func handleAudioEngineConfigurationChange(notification: Notification) {
+        audioManager.handleConfigurationChange()
     }
 
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
@@ -75,41 +89,34 @@ public class FlutterVoiceEnginePlugin: NSObject, FlutterPlugin, FlutterStreamHan
     }
 
     private func initialize(audioConfig: [String: Any], sessionConfig: [String: Any], processors: [[String: Any]], result: @escaping FlutterResult) {
-        do {
-            let channels = audioConfig["channels"] as? UInt32 ?? 1
-            let sampleRate = audioConfig["sampleRate"] as? Double ?? 48000.0
-            let bitDepth = audioConfig["bitDepth"] as? Int ?? 16
-            let bufferSize = audioConfig["bufferSize"] as? Int ?? 4096
-            let amplitudeThreshold = audioConfig["amplitudeThreshold"] as? Float ?? 0.05
-            let enableAEC = audioConfig["enableAEC"] as? Bool ?? true
+        let channels = audioConfig["channels"] as? UInt32 ?? 1
+        let sampleRate = audioConfig["sampleRate"] as? Double ?? 48000.0
+        let bitDepth = audioConfig["bitDepth"] as? Int ?? 16
+        let bufferSize = audioConfig["bufferSize"] as? Int ?? 4096
+        let amplitudeThreshold = audioConfig["amplitudeThreshold"] as? Float ?? 0.05
+        let enableAEC = audioConfig["enableAEC"] as? Bool ?? true
+        let category = mapCategory(sessionConfig["category"] as? String ?? "playAndRecord")
+        let mode = mapMode(sessionConfig["mode"] as? String ?? "spokenAudio")
+        let options = (sessionConfig["options"] as? [String] ?? []).compactMap { mapOption($0) }
+        let preferredBufferDuration = sessionConfig["preferredBufferDuration"] as? Double ?? 0.005
 
-            audioManager = AudioManager(
-                channels: channels,
-                sampleRate: sampleRate,
-                bitDepth: bitDepth,
-                bufferSize: bufferSize,
-                amplitudeThreshold: amplitudeThreshold,
-                enableAEC: enableAEC
-            )
+        audioManager = AudioManager(
+            channels: channels,
+            sampleRate: sampleRate,
+            bitDepth: bitDepth,
+            bufferSize: bufferSize,
+            amplitudeThreshold: amplitudeThreshold,
+            enableAEC: enableAEC,
+            category: category,
+            mode: mode,
+            options: AVAudioSession.CategoryOptions(options),
+            preferredSampleRate: sampleRate,
+            preferredBufferDuration: preferredBufferDuration
+        )
 
-            let category = sessionConfig["category"] as? String ?? "playAndRecord"
-            let mode = sessionConfig["mode"] as? String ?? "spokenAudio"
-            let options = (sessionConfig["options"] as? [String] ?? []).compactMap { mapOption($0) }
-            let bufferDuration = sessionConfig["bufferDuration"] as? Double ?? 0.005
-
-            try audioManager.setupAudioSession(
-                category: mapCategory(category),
-                mode: mapMode(mode),
-                options: AVAudioSession.CategoryOptions(options),
-                sampleRate: sampleRate,
-                bufferDuration: bufferDuration
-            )
-            audioManager.setupEngine()
-            print("Plugin: Initialization complete")
-            result(nil)
-        } catch {
-            result(FlutterError(code: "INITIALIZATION_FAILED", message: error.localizedDescription, details: nil))
-        }
+        audioManager.setupEngine()
+        print("Plugin: Initialization complete")
+        result(nil)
     }
 
     private func startRecording(result: @escaping FlutterResult) {

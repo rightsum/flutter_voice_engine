@@ -5,18 +5,18 @@ public class AudioManager {
     private let audioEngine = AVAudioEngine()
     private let playerNode = AVAudioPlayerNode()
     private var inputNode: AVAudioInputNode { audioEngine.inputNode }
-    private var inputFormat: AVAudioFormat // 48kHz, mono, Float32
-    private var audioFormat: AVAudioFormat // 48kHz, stereo, Float32
-    private var webSocketFormat: AVAudioFormat // 24kHz, mono, PCM16
+    private var inputFormat: AVAudioFormat
+    private var audioFormat: AVAudioFormat
+    private var webSocketFormat: AVAudioFormat
     private var isRecording = false
     private let audioChunkPublisher = PassthroughSubject<Data, Never>()
     public let errorPublisher = PassthroughSubject<String, Never>()
     private var recordingConverter: AVAudioConverter?
     private var playbackConverter: AVAudioConverter?
-    private let amplitudeThreshold: Float = 0.05 // Match native
-    private let enableAEC: Bool = true // Match native
+    private let amplitudeThreshold: Float
+    private let enableAEC: Bool
     private var cancellables = Set<AnyCancellable>()
-    private let targetSampleRate: Float64 = 24000 // WebSocket expects 24kHz
+    private let targetSampleRate: Float64 = 24000
 
     public init(
         channels: UInt32 = 1,
@@ -24,18 +24,46 @@ public class AudioManager {
         bitDepth: Int = 16,
         bufferSize: Int = 4096,
         amplitudeThreshold: Float = 0.05,
-        enableAEC: Bool = true
+        enableAEC: Bool = true,
+        category: AVAudioSession.Category = .playAndRecord,
+        mode: AVAudioSession.Mode = .spokenAudio,
+        options: AVAudioSession.CategoryOptions = [.defaultToSpeaker, .duckOthers, .allowBluetoothA2DP],
+        preferredSampleRate: Double = 48000,
+        preferredBufferDuration: Double = 0.005
     ) {
-        let hardwareSampleRate: Float64 = 48000
+        self.amplitudeThreshold = amplitudeThreshold
+        self.enableAEC = enableAEC
+
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setCategory(category, mode: mode, options: options)
+            try session.setPreferredSampleRate(preferredSampleRate)
+            try session.setPreferredIOBufferDuration(preferredBufferDuration)
+            try session.setInputGain(1.0)
+            try session.setActive(true, options: [.notifyOthersOnDeactivation])
+            let appliedOptions = session.categoryOptions.rawValue
+            print("Audio session configured: sampleRate=\(session.sampleRate), channels=\(session.outputNumberOfChannels), inputGain=\(session.inputGain), options=\(appliedOptions), bufferDuration=\(session.ioBufferDuration)")
+            print("Expected options: defaultToSpeaker=8, duckOthers=32, allowBluetoothA2DP=4, Total=44")
+            if appliedOptions != 44 {
+                print("Warning: Options mismatch, expected 44, got \(appliedOptions)")
+                try session.setCategory(.playAndRecord, mode: .spokenAudio, options: [.defaultToSpeaker])
+                print("Fallback applied: options=\(session.categoryOptions.rawValue)")
+            }
+        } catch {
+            print("Failed to configure audio session: \(error)")
+            errorPublisher.send("Audio session error: \(error.localizedDescription)")
+        }
+
+        let actualSampleRate = session.sampleRate
         self.inputFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
-            sampleRate: hardwareSampleRate,
+            sampleRate: actualSampleRate,
             channels: channels,
             interleaved: true
         )!
         self.audioFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
-            sampleRate: hardwareSampleRate,
+            sampleRate: actualSampleRate,
             channels: 2,
             interleaved: false
         )!
@@ -45,54 +73,7 @@ public class AudioManager {
             channels: channels,
             interleaved: true
         )!
-        setupAudioSession()
-        let session = AVAudioSession.sharedInstance()
-        if session.sampleRate != hardwareSampleRate {
-            self.inputFormat = AVAudioFormat(
-                commonFormat: .pcmFormatFloat32,
-                sampleRate: session.sampleRate,
-                channels: channels,
-                interleaved: true
-            )!
-            self.audioFormat = AVAudioFormat(
-                commonFormat: .pcmFormatFloat32,
-                sampleRate: session.sampleRate,
-                channels: 2,
-                interleaved: false
-            )!
-        }
         setupConverters()
-    }
-
-    private func setupAudioSession() {
-        let session = AVAudioSession.sharedInstance()
-        do {
-            let options: AVAudioSession.CategoryOptions = [.defaultToSpeaker, .duckOthers, .allowBluetoothA2DP]
-            try session.setCategory(
-                .playAndRecord,
-                mode: .spokenAudio,
-                options: options
-            )
-            try session.setPreferredSampleRate(48000)
-            try session.setPreferredIOBufferDuration(0.005) // Match native
-            try session.setInputGain(1.0) // Ensure loud input
-            try session.setActive(true, options: [.notifyOthersOnDeactivation])
-            let appliedOptions = session.categoryOptions.rawValue
-            print("Audio session configured: sampleRate=\(session.sampleRate), channels=\(session.outputNumberOfChannels), inputGain=\(session.inputGain), options=\(appliedOptions), bufferDuration=\(session.ioBufferDuration)")
-            print("Expected options: defaultToSpeaker=8, duckOthers=32, allowBluetoothA2DP=4, Total=44")
-            if appliedOptions != 44 {
-                print("Warning: Options mismatch, expected 44, got \(appliedOptions)")
-                try session.setCategory(
-                    .playAndRecord,
-                    mode: .spokenAudio,
-                    options: [.defaultToSpeaker]
-                )
-                print("Fallback applied: options=\(session.categoryOptions.rawValue)")
-            }
-        } catch {
-            print("Failed to configure audio session: \(error)")
-            errorPublisher.send("Audio session error: \(error.localizedDescription)")
-        }
     }
 
     private func setupConverters() {
@@ -107,7 +88,6 @@ public class AudioManager {
 
     public func setupEngine() {
         audioEngine.attach(playerNode)
-        // Ensure audio session is active
         let session = AVAudioSession.sharedInstance()
         do {
             try session.setActive(true)
@@ -115,19 +95,16 @@ public class AudioManager {
             errorPublisher.send("Failed to activate audio session: \(error.localizedDescription)")
             return
         }
-        // Use predefined audioFormat for output (2 ch, 48kHz, Float32)
         guard audioFormat.sampleRate > 0, audioFormat.channelCount == 2 else {
             errorPublisher.send("Invalid output format: \(audioFormat)")
             return
         }
-        // Use inputFormat for input node (1 ch, 48kHz, Float32)
         var inputNodeFormat = inputNode.outputFormat(forBus: 0)
         if inputNodeFormat.sampleRate == 0 || inputNodeFormat.channelCount != 1 {
             print("Invalid input node format: \(inputNodeFormat), using fallback: \(inputFormat)")
             inputNodeFormat = inputFormat
         }
         do {
-            // Connect nodes using validated formats
             audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: audioFormat)
             audioEngine.connect(audioEngine.mainMixerNode, to: audioEngine.outputNode, format: audioFormat)
             audioEngine.mainMixerNode.outputVolume = 1.0
@@ -145,24 +122,7 @@ public class AudioManager {
         }
     }
 
-    public func setupAudioSession(
-        category: AVAudioSession.Category,
-        mode: AVAudioSession.Mode,
-        options: AVAudioSession.CategoryOptions,
-        sampleRate: Double,
-        bufferDuration: Double
-    ) throws {
-        // Override with native settings
-        setupAudioSession()
-    }
-
-    public func startRecording() -> AnyPublisher<Data, Never> {
-        guard !isRecording else {
-            print("Already recording")
-            return audioChunkPublisher.eraseToAnyPublisher()
-        }
-        isRecording = true
-        print("Starting recording with format=\(webSocketFormat)")
+    private func installRecordingTap() {
         let bus = 0
         inputNode.installTap(onBus: bus, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
             guard let self = self, let converter = self.recordingConverter else {
@@ -205,6 +165,16 @@ public class AudioManager {
                 self.audioChunkPublisher.send(audioData)
             }
         }
+    }
+
+    public func startRecording() -> AnyPublisher<Data, Never> {
+        guard !isRecording else {
+            print("Already recording")
+            return audioChunkPublisher.eraseToAnyPublisher()
+        }
+        isRecording = true
+        print("Starting recording with format=\(webSocketFormat)")
+        installRecordingTap()
         return audioChunkPublisher.eraseToAnyPublisher()
     }
 
@@ -267,5 +237,26 @@ public class AudioManager {
             print("Failed to deactivate audio session: \(error)")
         }
         print("AudioManager shutdown")
+    }
+
+    public func handleConfigurationChange() {
+        print("Audio engine configuration changed")
+        if !audioEngine.isRunning {
+            print("Engine stopped, attempting to restart")
+            do {
+                try audioEngine.start()
+                if isRecording {
+                    print("Reinstalling recording tap")
+                    installRecordingTap()
+                }
+            } catch {
+                print("Failed to restart audio engine: \(error)")
+                errorPublisher.send("Engine restart failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    public func isRecordingActive() -> Bool {
+        return isRecording
     }
 }
