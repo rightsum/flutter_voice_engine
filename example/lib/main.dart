@@ -64,6 +64,18 @@ class HomePage extends StatelessWidget {
                       : null,
                   child: const Text('Stop Recording'),
                 ),
+                ElevatedButton(
+                  onPressed: state.isMusicLoading ? null : () {
+                    if(!state.isMusicPlaying) {
+                      context.read<SessionCubit>().playMusic("https://firebasestorage.googleapis.com/v0/b/dr-nur-ai.firebasestorage.app/o/music%2FZen%20Journey.mp3?alt=media&token=4a94274a-5a99-4058-be53-8932ecc0eb8b");
+                    } else {
+                      context.read<SessionCubit>().stopMusic();
+                    }
+                  },
+                  child: Text(state.isMusicPlaying ? 'Pause Background Music' : 'Play Background Music'),
+                ),
+                if(state.isMusicLoading)
+                  const CircularProgressIndicator(),
               ],
             ),
           );

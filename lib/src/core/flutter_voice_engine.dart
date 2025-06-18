@@ -95,16 +95,57 @@ class FlutterVoiceEngine {
     print('Flutter: Stopping playback');
     await _channel.invokeMethod('stopPlayback');
   }
-
-  Future<void> shutdown() async {
+  Future<void> shutdownBot() async {
     if (!isInitialized) {
       print('Flutter: Not initialized');
       return;
     }
-    print('Flutter: Shutting down VoiceEngine');
-    await _channel.invokeMethod('shutdown');
+    print('Flutter: Shutting down only bot (music continues)');
+    await _channel.invokeMethod('shutdownBot');
+    isInitialized = false;
+    isRecording = false;
+    // Don't close _audioChunkController if you want to allow music events/interaction.
+  }
+
+  Future<void> shutdownAll() async {
+    if (!isInitialized) {
+      print('Flutter: Not initialized');
+      return;
+    }
+    print('Flutter: Shutting down everything (bot + music)');
+    await _channel.invokeMethod('shutdownAll');
     isInitialized = false;
     isRecording = false;
     await _audioChunkController.close();
   }
+
+  /// Play background music from a local file path.
+  /// Set [loop] to true to loop the music.
+  Future<void> playBackgroundMusic(String source, {bool loop = true}) async {
+    if (!isInitialized) throw Exception('VoiceEngine not initialized');
+    await _channel.invokeMethod('playBackgroundMusic', {
+      'source': source,
+      'loop': loop,
+    });
+  }
+
+  /// Plays a playlist of music files or URLs with given loop mode.
+  /// [loopMode] can be 'none', 'track', or 'playlist'.
+  Future<void> playBackgroundMusicPlaylist(List<String> sources, {String loopMode = 'none'}) async {
+    if (!isInitialized) throw Exception('VoiceEngine not initialized');
+    await _channel.invokeMethod('playBackgroundMusicPlaylist', {
+      'sources': sources,
+      'loopMode': loopMode,
+    });
+  }
+
+  /// Stop the background music.
+  Future<void> stopBackgroundMusic() async {
+    if (!isInitialized) {
+      throw Exception('VoiceEngine not initialized');
+    }
+    print('Flutter: Stopping background music');
+    await _channel.invokeMethod('stopBackgroundMusic');
+  }
+
 }

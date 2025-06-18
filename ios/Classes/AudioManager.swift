@@ -1,5 +1,7 @@
 import AVFoundation
 import Combine
+import CommonCrypto
+
 
 public class AudioManager {
     private let audioEngine = AVAudioEngine()
@@ -17,6 +19,16 @@ public class AudioManager {
     private let enableAEC: Bool
     private var cancellables = Set<AnyCancellable>()
     private let targetSampleRate: Float64 = 24000
+    
+    private let musicPlayerNode = AVAudioPlayerNode()
+    private var musicFile: AVAudioFile?
+    private var musicIsPlaying = false
+    
+    private var playlist: [String] = []
+    private var playlistLocalPaths: [String] = []
+    private var currentTrackIndex: Int = 0
+    private var loopMode: String = "none" // "none", "track", "playlist"
+
 
     public init(
         channels: UInt32 = 1,
@@ -27,7 +39,7 @@ public class AudioManager {
         enableAEC: Bool = true,
         category: AVAudioSession.Category = .playAndRecord,
         mode: AVAudioSession.Mode = .spokenAudio,
-        options: AVAudioSession.CategoryOptions = [.defaultToSpeaker, .duckOthers, .allowBluetoothA2DP],
+        options: AVAudioSession.CategoryOptions = [.defaultToSpeaker, .mixWithOthers, .allowBluetoothA2DP],
         preferredSampleRate: Double = 48000,
         preferredBufferDuration: Double = 0.005
     ) {
@@ -87,27 +99,21 @@ public class AudioManager {
     }
 
     public func setupEngine() {
-        audioEngine.attach(playerNode)
+        // Attach audio nodes
+        audioEngine.attach(playerNode)        // Bot playback
+        audioEngine.attach(musicPlayerNode)   // Background music playback
+
+        // Connect nodes to main mixer
+        audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: audioFormat)
+        audioEngine.connect(musicPlayerNode, to: audioEngine.mainMixerNode, format: audioFormat)
+        audioEngine.connect(audioEngine.mainMixerNode, to: audioEngine.outputNode, format: audioFormat)
+        
+        // Set mixer output volume if needed
+        audioEngine.mainMixerNode.outputVolume = 1.0
+
         let session = AVAudioSession.sharedInstance()
         do {
             try session.setActive(true)
-        } catch {
-            errorPublisher.send("Failed to activate audio session: \(error.localizedDescription)")
-            return
-        }
-        guard audioFormat.sampleRate > 0, audioFormat.channelCount == 2 else {
-            errorPublisher.send("Invalid output format: \(audioFormat)")
-            return
-        }
-        var inputNodeFormat = inputNode.outputFormat(forBus: 0)
-        if inputNodeFormat.sampleRate == 0 || inputNodeFormat.channelCount != 1 {
-            print("Invalid input node format: \(inputNodeFormat), using fallback: \(inputFormat)")
-            inputNodeFormat = inputFormat
-        }
-        do {
-            audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: audioFormat)
-            audioEngine.connect(audioEngine.mainMixerNode, to: audioEngine.outputNode, format: audioFormat)
-            audioEngine.mainMixerNode.outputVolume = 1.0
             if enableAEC {
                 try inputNode.setVoiceProcessingEnabled(true)
                 print("Voice processing enabled for AEC")
@@ -121,6 +127,112 @@ public class AudioManager {
             errorPublisher.send("Engine error: \(error.localizedDescription)")
         }
     }
+    
+    private func isRemoteURL(_ source: String) -> Bool {
+        return source.lowercased().hasPrefix("http://") || source.lowercased().hasPrefix("https://")
+    }
+
+    /// Downloads a file from a URL to a unique temp file, returns the local path.
+    /// Uses MD5 hash of URL for unique file caching.
+    private func downloadToTemp(_ urlStr: String, completion: @escaping (String?) -> Void) {
+        guard let url = URL(string: urlStr) else { completion(nil); return }
+        let tempDir = FileManager.default.temporaryDirectory
+        let filename = md5(urlStr) + (url.pathExtension.isEmpty ? ".mp3" : ".\(url.pathExtension)")
+        let localPath = tempDir.appendingPathComponent(filename).path
+        if FileManager.default.fileExists(atPath: localPath) {
+            completion(localPath)
+            return
+        }
+        let task = URLSession.shared.downloadTask(with: url) { (tempURL, _, error) in
+            if let tempURL = tempURL, error == nil {
+                try? FileManager.default.moveItem(at: tempURL, to: URL(fileURLWithPath: localPath))
+                completion(localPath)
+            } else {
+                completion(nil)
+            }
+        }
+        task.resume()
+    }
+    
+    /// Simple md5 hash for filename uniqueness
+    private func md5(_ string: String) -> String {
+        let data = Data(string.utf8)
+        var digest = [UInt8](repeating: 0, count: Int(CC_MD5_DIGEST_LENGTH))
+        data.withUnsafeBytes {
+            _ = CC_MD5($0.baseAddress, CC_LONG(data.count), &digest)
+        }
+        return digest.map { String(format: "%02hhx", $0) }.joined()
+    }
+
+    /// Plays music from a local file path, asset, or remote URL. Handles looping.
+    public func playBackgroundMusic(source: String, loop: Bool = true) {
+        stopBackgroundMusic()
+        let play: (String) -> Void = { [weak self] localPath in
+            guard let self = self else { return }
+            do {
+                self.musicFile = try AVAudioFile(forReading: URL(fileURLWithPath: localPath))
+                guard let musicFile = self.musicFile else { return }
+                self.musicPlayerNode.scheduleFile(musicFile, at: nil, completionHandler: loop ? { [weak self] in
+                    guard let self = self else { return }
+                    self.playBackgroundMusic(source: localPath, loop: loop)
+                } : nil)
+                if !self.audioEngine.isRunning {
+                    try self.audioEngine.start()
+                }
+                self.musicPlayerNode.play()
+                self.musicIsPlaying = true
+                print("Background music started: \(localPath)")
+            } catch {
+                print("Failed to play music: \(error)")
+            }
+        }
+        if isRemoteURL(source) {
+            // Download, then play
+            downloadToTemp(source) { localPath in
+                DispatchQueue.main.async {
+                    if let path = localPath {
+                        play(path)
+                    } else {
+                        print("Failed to download music from \(source)")
+                    }
+                }
+            }
+        } else if FileManager.default.fileExists(atPath: source) {
+            // Local file, play directly
+            play(source)
+        } else if let bundlePath = Bundle.main.path(forResource: source, ofType: nil) {
+            // Asset in bundle (if you copied it to bundle at build time)
+            play(bundlePath)
+        } else {
+            print("AudioManager: Source not found: \(source)")
+        }
+    }
+
+    
+    public func stopBackgroundMusic() {
+        // Is the engine running and node attached?
+        guard audioEngine.isRunning, audioEngine.attachedNodes.contains(musicPlayerNode) else {
+            musicIsPlaying = false
+            playlist = []
+            playlistLocalPaths = []
+            currentTrackIndex = 0
+            print("Background music stopped (engine not running or node detached)")
+            return
+        }
+        // Check if the node is actually playing before stopping
+        if musicPlayerNode.isPlaying {
+            musicPlayerNode.pause()
+        } else {
+            print("Background music node was not playing, skipping stop()")
+        }
+        musicIsPlaying = false
+        playlist = []
+        playlistLocalPaths = []
+        currentTrackIndex = 0
+        print("Background music stopped")
+    }
+
+
 
     private func installRecordingTap() {
         let bus = 0
@@ -196,7 +308,7 @@ public class AudioManager {
         }
         inputBuffer.frameLength = frameCount
         audioData.withUnsafeBytes { rawBuffer in
-            inputBuffer.int16ChannelData?.pointee.assign(from: rawBuffer.baseAddress!.assumingMemoryBound(to: Int16.self), count: Int(frameCount * webSocketFormat.channelCount))
+            inputBuffer.int16ChannelData?.pointee.update(from: rawBuffer.baseAddress!.assumingMemoryBound(to: Int16.self), count: Int(frameCount * webSocketFormat.channelCount))
         }
         let outputFrameCapacity = UInt32(round(Double(frameCount) * audioFormat.sampleRate / webSocketFormat.sampleRate))
         guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: audioFormat, frameCapacity: AVAudioFrameCount(outputFrameCapacity)) else {
@@ -225,10 +337,75 @@ public class AudioManager {
         playerNode.reset()
         print("Playback stopped")
     }
+    
+    public func playBackgroundMusicPlaylist(sources: [String], loopMode: String = "none") {
+        stopBackgroundMusic()
+        playlist = sources
+        playlistLocalPaths = Array(repeating: "", count: sources.count)
+        currentTrackIndex = 0
+        self.loopMode = loopMode
+        prepareNextTrack(start: true)
+    }
+    
+    private func prepareNextTrack(start: Bool = false) {
+        guard currentTrackIndex < playlist.count else {
+            if loopMode == "playlist" && !playlist.isEmpty {
+                currentTrackIndex = 0
+                prepareNextTrack(start: true)
+            }
+            return
+        }
+        let source = playlist[currentTrackIndex]
+        if isRemoteURL(source) {
+            downloadToTemp(source) { [weak self] localPath in
+                guard let self = self, let path = localPath else {
+                    print("Download failed for \(source)")
+                    return
+                }
+                DispatchQueue.main.async {
+                    self.playSingleTrack(localPath: path, start: start)
+                }
+            }
+        } else {
+            playSingleTrack(localPath: source, start: start)
+        }
+    }
+    
+    private func playSingleTrack(localPath: String, start: Bool = false) {
+        do {
+            musicFile = try AVAudioFile(forReading: URL(fileURLWithPath: localPath))
+            musicPlayerNode.stop()
+            musicPlayerNode.scheduleFile(musicFile!, at: nil, completionHandler: { [weak self] in
+                guard let self = self else { return }
+                if self.loopMode == "track" {
+                    self.prepareNextTrack(start: true) // replays same track
+                } else {
+                    self.currentTrackIndex += 1
+                    self.prepareNextTrack(start: true)
+                }
+            })
+            if !audioEngine.isRunning {
+                try audioEngine.start()
+            }
+            musicPlayerNode.play()
+            musicIsPlaying = true
+            print("Playing music track: \(localPath)")
+        } catch {
+            print("Failed to play track \(localPath): \(error)")
+        }
+    }
 
-    public func shutdown() {
+    public func shutdownBot() {
         stopRecording()
         stopPlayback()
+        // Do NOT stop audioEngine or session, do NOT stop music
+        print("Bot stopped, music (if playing) continues.")
+    }
+
+    public func shutdownAll() {
+        stopRecording()
+        stopPlayback()
+        musicPlayerNode.stop()
         audioEngine.stop()
         cancellables.removeAll()
         do {
@@ -236,8 +413,9 @@ public class AudioManager {
         } catch {
             print("Failed to deactivate audio session: \(error)")
         }
-        print("AudioManager shutdown")
+        print("AudioManager shutdown (bot + music)")
     }
+
 
     public func handleConfigurationChange() {
         print("Audio engine configuration changed")
