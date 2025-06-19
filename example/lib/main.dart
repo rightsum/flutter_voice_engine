@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:flutter_voice_engine_example/session/background_music_sheet.dart';
 import 'package:flutter_voice_engine_example/session/session_cubit.dart';
 import 'package:flutter_voice_engine_example/session/session_state.dart';
+
 void main() {
   runApp(const MyApp());
 }
@@ -20,8 +22,22 @@ class MyApp extends StatelessWidget {
   }
 }
 
-class HomePage extends StatelessWidget {
+class HomePage extends StatefulWidget {
   const HomePage({super.key});
+
+  @override
+  State<HomePage> createState() => _HomePageState();
+}
+
+class _HomePageState extends State<HomePage> {
+
+  @override
+  void initState() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      context.read<SessionCubit>().setMusicPlaylist(musicPlaylist);
+    });
+    super.initState();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -37,45 +53,44 @@ class HomePage extends StatelessWidget {
                 Text('Recording: ${state.isRecording ? 'On' : 'Off'}'),
                 Text('Playing: ${state.isPlaying ? 'On' : 'Off'}'),
                 if (state.error != null)
-                  Text('Error: ${state.error}', style: const TextStyle(color: Colors.red)),
+                  Text(
+                    'Error: ${state.error}',
+                    style: const TextStyle(color: Colors.red),
+                  ),
                 const SizedBox(height: 20),
                 ElevatedButton(
-                  onPressed: state.isSessionStarted
-                      ? null
-                      : () => context.read<SessionCubit>().startSession(),
+                  onPressed: state.isSessionStarted ? null : () => context.read<SessionCubit>().startSession(),
                   child: const Text('Start Session'),
                 ),
                 ElevatedButton(
-                  onPressed: state.isSessionStarted
-                      ? () => context.read<SessionCubit>().stopSession()
-                      : null,
+                  onPressed: state.isSessionStarted ? () => context.read<SessionCubit>().stopSession() : null,
                   child: const Text('Stop Session'),
                 ),
                 ElevatedButton(
-                  onPressed: state.isSessionStarted && !state.isRecording
-                      ? () => context.read<SessionCubit>().startRecording()
-                      : null,
+                  onPressed: state.isSessionStarted && !state.isRecording ? () => context.read<SessionCubit>().startRecording() : null,
                   child: const Text('Start Recording'),
                 ),
                 ElevatedButton(
-                  onPressed: state.isRecording
-                      ? () => context.read<SessionCubit>().stopRecording()
-                      : null,
+                  onPressed: state.isRecording ? () => context.read<SessionCubit>().stopRecording() : null,
                   child: const Text('Stop Recording'),
                 ),
-                // ElevatedButton(
-                //   onPressed: state.isMusicLoading ? null : () {
-                //     if(!state.isMusicPlaying) {
-                //       context.read<SessionCubit>().playMusic();
-                //     } else {
-                //       context.read<SessionCubit>().stopMusic();
-                //     }
-                //   },
-                //   child: Text(state.isMusicPlaying ? 'Pause Background Music' : 'Play Background Music'),
-                // ),
                 const MusicPlayerCard(),
-                if(state.isMusicLoading)
-                  const CircularProgressIndicator(),
+                if (state.isMusicLoading) const CircularProgressIndicator(),
+                ElevatedButton(
+                  onPressed: () {
+                    showAdaptiveDialog(
+                      context: context,
+                      barrierDismissible: true,
+                      builder: (dialogContext) => MultiBlocProvider(
+                        providers: [
+                          BlocProvider.value(value: context.read<SessionCubit>()),
+                        ],
+                        child: const BackgroundMusicBottomSheet(),
+                      ),
+                    );
+                  },
+                  child: const Text('Open Dialog'),
+                ),
               ],
             ),
           );
@@ -84,7 +99,6 @@ class HomePage extends StatelessWidget {
     );
   }
 }
-
 
 class MusicPlayerCard extends StatefulWidget {
   const MusicPlayerCard({super.key});
@@ -114,13 +128,17 @@ class _MusicPlayerCardState extends State<MusicPlayerCard> {
       buildWhen: (prev, curr) =>
       prev.musicPosition != curr.musicPosition ||
           prev.musicDuration != curr.musicDuration ||
-          prev.isMusicPlaying != curr.isMusicPlaying,
+          prev.isMusicPlaying != curr.isMusicPlaying ||
+          prev.currentMusicUrl != curr.currentMusicUrl,
       builder: (context, state) {
         final isPlaying = state.isMusicPlaying;
-        final position = _dragging ? _dragValue : state.musicPosition;
-        final duration = state.musicDuration;
-        final posText = _format(position!);
-        final durText = _format(duration!);
+        final position = _dragging ? _dragValue : state.musicPosition ?? Duration.zero;
+        final duration = state.musicDuration ?? Duration.zero;
+        final posText = _format(position);
+        final durText = _format(duration);
+        final trackName = state.currentMusicUrl.isNotEmpty
+            ? Uri.decodeComponent(Uri.parse(state.currentMusicUrl).pathSegments.last.replaceFirst('music/', ''))
+            : 'No Music Playing';
 
         return Card(
           margin: const EdgeInsets.symmetric(vertical: 16, horizontal: 24),
@@ -142,13 +160,10 @@ class _MusicPlayerCardState extends State<MusicPlayerCard> {
                       child: const Icon(Icons.music_note, color: Colors.teal, size: 30),
                     ),
                     const SizedBox(width: 14),
-                    const Expanded(
+                    Expanded(
                       child: Text(
-                        'Calm Ocean Waves', // Random music name
-                        style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          fontSize: 18,
-                        ),
+                        trackName,
+                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
                         overflow: TextOverflow.ellipsis,
                       ),
                     ),
@@ -160,8 +175,7 @@ class _MusicPlayerCardState extends State<MusicPlayerCard> {
                       ),
                       onPressed: () {
                         final cubit = context.read<SessionCubit>();
-
-                        print("Music button pressed, isPlaying: $isPlaying");
+                        print("Music button pressed, isPlaying: $isPlaying, url: ${state.currentMusicUrl}");
                         if (isPlaying) {
                           cubit.stopMusic();
                         } else {
@@ -193,9 +207,7 @@ class _MusicPlayerCardState extends State<MusicPlayerCard> {
                     max: duration.inMilliseconds.toDouble().clamp(1, double.infinity),
                     value: position.inMilliseconds.clamp(0, duration.inMilliseconds == 0 ? 1 : duration.inMilliseconds).toDouble(),
                     onChangeStart: (_) => setState(() => _dragging = true),
-                    onChanged: (v) {
-                      setState(() => _dragValue = Duration(milliseconds: v.round()));
-                    },
+                    onChanged: (v) => setState(() => _dragValue = Duration(milliseconds: v.round())),
                     onChangeEnd: (v) {
                       final cubit = context.read<SessionCubit>();
                       cubit.seekMusic(Duration(milliseconds: v.round()));
@@ -234,7 +246,7 @@ class _MusicPlayerCardState extends State<MusicPlayerCard> {
 
   String _format(Duration d) {
     final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
-    final s = (d.inSeconds.remainder(60)).toString().padLeft(2, '0');
+    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
     return "$m:$s";
   }
 }

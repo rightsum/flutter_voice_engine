@@ -25,12 +25,12 @@ public class AudioManager {
     private let musicPlayerNode = AVAudioPlayerNode()
     private var musicFile: AVAudioFile?
     public var musicIsPlaying = false
+    private var currentTrackIndex: Int = -1
+    private var loopMode: String = "none" // "none", "track", "playlist"
     private var playlist: [String] = []
     private var playlistLocalPaths: [String] = []
-    private var currentTrackIndex: Int = 0
-    private var loopMode: String = "none" // "none", "track", "playlist"
-
-    // Stream for all events
+    private var musicFiles: [AVAudioFile?] = []
+    private var playlistUrls: [String] = []
     private var musicPositionTimer: Timer?
     public var eventSink: FlutterEventSink?
 
@@ -62,7 +62,7 @@ public class AudioManager {
             print("Expected options: defaultToSpeaker=8, mixWithOthers=32, allowBluetoothA2DP=4, Total=44")
             if appliedOptions != 44 {
                 print("Warning: Options mismatch, expected 44, got \(appliedOptions)")
-                try session.setCategory(.playAndRecord, mode: .spokenAudio, options: [.defaultToSpeaker])
+                try session.setCategory(.playAndRecord, mode: .spokenAudio, options: [.defaultToSpeaker, .mixWithOthers, .allowBluetoothA2DP])
                 print("Fallback applied: options=\(session.categoryOptions.rawValue)")
             }
         } catch {
@@ -159,56 +159,36 @@ public class AudioManager {
         }
         let sampleRate = musicFile.processingFormat.sampleRate
         let duration = Double(musicFile.length) / sampleRate
-        let clampedPosition = max(0, min(position, duration)) // Clamp to valid range
+        let clampedPosition = max(0, min(position, duration))
         let framePosition = AVAudioFramePosition(clampedPosition * sampleRate)
-        
-        // Preserve playback state
         let wasPlaying = musicPlayerNode.isPlaying
-        
-        // Schedule segment at next render time
-        let frameCount = AVAudioFrameCount(musicFile.length - framePosition)
-        if frameCount > 0 {
-            // Pause briefly to queue new segment
-            if wasPlaying {
-                musicPlayerNode.pause()
-            }
-            musicPlayerNode.scheduleSegment(
-                musicFile,
-                startingFrame: framePosition,
-                frameCount: frameCount,
-                at: AVAudioTime(hostTime: mach_absolute_time()), // Start immediately
-                completionHandler: musicIsPlaying && loopMode == "track" ? { [weak self] in
-                    guard let self = self else { return }
-                    self.playBackgroundMusic(source: musicFile.url.path, loop: true)
-                    print("Music looped after seek.")
-                } : nil
-            )
-            // Resume playback
-            if wasPlaying {
-                if !audioEngine.isRunning {
-                    do {
-                        try audioEngine.start()
-                        print("Started audioEngine for seek playback.")
-                    } catch {
-                        print("Failed to start audio engine: \(error)")
-                        eventSink?(["type": "error", "message": "Failed to start audio engine: \(error.localizedDescription)"])
-                    }
-                }
-                musicPlayerNode.play()
-                musicIsPlaying = true
-            }
-        } else {
-            // Handle edge case: seek to end
-            if wasPlaying {
-                musicPlayerNode.pause()
-            }
-            musicPlayerNode.scheduleFile(musicFile, at: nil, completionHandler: nil)
-            musicIsPlaying = false
-            emitMusicIsPlaying()
-            print("Seeked to end, music paused.")
+        if wasPlaying {
+            musicPlayerNode.pause()
         }
-        
-        // Emit updated position
+        musicPlayerNode.scheduleSegment(
+            musicFile,
+            startingFrame: framePosition,
+            frameCount: AVAudioFrameCount(musicFile.length - framePosition),
+            at: nil,
+            completionHandler: { [weak self] in
+                guard let self = self, self.musicIsPlaying, self.loopMode == "track" else { return }
+                self.playTrackAtIndex(self.currentTrackIndex)
+                print("Music looped after seek.")
+            }
+        )
+        if wasPlaying {
+            if !audioEngine.isRunning {
+                do {
+                    try audioEngine.start()
+                    print("Started audioEngine for seek playback.")
+                } catch {
+                    print("Failed to start audio engine: \(error)")
+                    eventSink?(["type": "error", "message": "Failed to start audio engine: \(error.localizedDescription)"])
+                }
+            }
+            musicPlayerNode.play()
+            musicIsPlaying = true
+        }
         DispatchQueue.main.async { [weak self] in
             guard let sink = self?.eventSink else {
                 print("eventSink is nil, cannot send position")
@@ -236,7 +216,6 @@ public class AudioManager {
         musicPositionTimer = nil
     }
 
-    
     private func isRemoteURL(_ source: String) -> Bool {
         return source.lowercased().hasPrefix("http://") || source.lowercased().hasPrefix("https://")
     }
@@ -252,9 +231,16 @@ public class AudioManager {
         }
         let task = URLSession.shared.downloadTask(with: url) { (tempURL, _, error) in
             if let tempURL = tempURL, error == nil {
-                try? FileManager.default.moveItem(at: tempURL, to: URL(fileURLWithPath: localPath))
-                completion(localPath)
+                do {
+                    try FileManager.default.moveItem(at: tempURL, to: URL(fileURLWithPath: localPath))
+                    completion(localPath)
+                    print("Downloaded track: \(urlStr) to \(localPath)")
+                } catch {
+                    print("Failed to move downloaded file: \(error)")
+                    completion(nil)
+                }
             } else {
+                print("Failed to download music from \(urlStr): \(error?.localizedDescription ?? "Unknown error")")
                 DispatchQueue.main.async { [weak self] in
                     self?.eventSink?(["type": "error", "message": "Failed to download music from \(urlStr)"])
                 }
@@ -273,6 +259,52 @@ public class AudioManager {
         return digest.map { String(format: "%02hhx", $0) }.joined()
     }
 
+    public func setMusicPlaylist(_ urls: [String]) {
+        stopBackgroundMusic()
+        playlistUrls = urls
+        playlistLocalPaths = Array(repeating: "", count: urls.count)
+        musicFiles = Array(repeating: nil, count: urls.count)
+        currentTrackIndex = -1
+        print("Setting playlist: \(urls)")
+        preloadPlaylist()
+    }
+
+    private func preloadPlaylist() {
+        for (index, url) in playlistUrls.enumerated() {
+            if isRemoteURL(url) {
+                downloadToTemp(url) { [weak self] localPath in
+                    guard let self = self, let path = localPath else {
+                        print("Failed to preload track \(url)")
+                        return
+                    }
+                    do {
+                        let audioFile = try AVAudioFile(forReading: URL(fileURLWithPath: path))
+                        DispatchQueue.main.async {
+                            self.playlistLocalPaths[index] = path
+                            self.musicFiles[index] = audioFile
+                            print("Preloaded track \(index): \(path)")
+                        }
+                    } catch {
+                        print("Failed to create audio file for \(path): \(error)")
+                        DispatchQueue.main.async { [weak self] in
+                            self?.eventSink?(["type": "error", "message": "Failed to preload track \(url): \(error.localizedDescription)"])
+                        }
+                    }
+                }
+            } else {
+                do {
+                    let audioFile = try AVAudioFile(forReading: URL(fileURLWithPath: url))
+                    playlistLocalPaths[index] = url
+                    musicFiles[index] = audioFile
+                    print("Preloaded local track \(index): \(url)")
+                } catch {
+                    print("Failed to preload local track \(url): \(error)")
+                    eventSink?(["type": "error", "message": "Failed to preload track \(url): \(error.localizedDescription)"])
+                }
+            }
+        }
+    }
+
     public func playBackgroundMusic(source: String, loop: Bool = true) {
         stopBackgroundMusic()
         let play: (String) -> Void = { [weak self] localPath in
@@ -283,20 +315,8 @@ public class AudioManager {
                 let scheduleFile: () -> Void = {
                     self.musicPlayerNode.scheduleFile(musicFile, at: nil, completionHandler: loop ? { [weak self] in
                         guard let self = self, self.musicIsPlaying else { return }
-                        self.musicPlayerNode.scheduleFile(musicFile, at: nil, completionHandler: loop ? { [weak self] in
-                            self?.playBackgroundMusic(source: localPath, loop: loop)
-                            print("Music looped, rescheduling.")
-                        } : nil)
-                        if self.musicPlayerNode.isPlaying {
-                            self.musicPlayerNode.play()
-                        }
-                        DispatchQueue.main.async { [weak self] in
-                            guard let self = self, let sink = self.eventSink else { return }
-                            let duration = Double(musicFile.length) / musicFile.processingFormat.sampleRate
-                            print("Music looped, emitting position=0")
-                            sink(["type": "music_position", "position": 0.0, "duration": duration])
-                        }
-                        print("Music looped, restarted playback.")
+                        self.playBackgroundMusic(source: localPath, loop: loop)
+                        print("Music looped, rescheduling.")
                     } : nil)
                 }
                 if !self.audioEngine.attachedNodes.contains(self.musicPlayerNode) {
@@ -352,7 +372,6 @@ public class AudioManager {
            let playerTime = musicPlayerNode.playerTime(forNodeTime: nodeTime),
            playerTime.sampleRate > 0 {
             position = Double(playerTime.sampleTime) / playerTime.sampleRate
-            // Normalize position to [0, duration] for looping
             if position > duration {
                 position = position.truncatingRemainder(dividingBy: duration)
             }
@@ -394,9 +413,7 @@ public class AudioManager {
             emitMusicIsPlaying()
             print("Background music already paused, updated state")
         }
-        playlist = []
-        playlistLocalPaths = []
-        currentTrackIndex = 0
+        musicFile = nil
     }
 
     private func installRecordingTap() {
@@ -412,11 +429,6 @@ public class AudioManager {
             let amplitude = buffer.floatChannelData?.pointee.withMemoryRebound(to: Float.self, capacity: Int(buffer.frameLength)) { ptr in
                 (0..<Int(buffer.frameLength)).reduce(0.0) { max($0, abs(ptr[$1])) }
             } ?? 0
-            // Temporarily bypass amplitude check for debugging
-            // if amplitude < self.amplitudeThreshold && self.playerNode.isPlaying {
-            //     print("Skipping low-amplitude chunk during playback (possible echo)")
-            //     return
-            // }
             let frameCapacity = UInt32(round(Double(buffer.frameLength) * converter.outputFormat.sampleRate / buffer.format.sampleRate))
             guard let outputBuffer = AVAudioPCMBuffer(
                 pcmFormat: converter.outputFormat,
@@ -572,6 +584,8 @@ public class AudioManager {
             }
             musicPlayerNode.play()
             musicIsPlaying = true
+            emitMusicIsPlaying()
+            startEmittingMusicPosition()
             print("Playing music track: \(localPath)")
         } catch {
             print("Failed to play track \(localPath): \(error)")
@@ -585,7 +599,6 @@ public class AudioManager {
         stopRecording()
         stopPlayback()
         print("Bot stopped, music continues if playing.")
-        // Ensure musicPlayerNode and audioEngine remain controllable
         if !audioEngine.attachedNodes.contains(musicPlayerNode) {
             audioEngine.attach(musicPlayerNode)
             audioEngine.connect(musicPlayerNode, to: audioEngine.mainMixerNode, format: audioFormat)
@@ -641,5 +654,61 @@ public class AudioManager {
 
     public func isRecordingActive() -> Bool {
         return isRecording
+    }
+
+    public func playTrackAtIndex(_ index: Int) {
+        guard index >= 0 && index < playlistUrls.count else {
+            print("Invalid track index: \(index), playlistUrls count: \(playlistUrls.count)")
+            eventSink?(["type": "error", "message": "Invalid track index: \(index)"])
+            return
+        }
+        if currentTrackIndex == index && musicIsPlaying {
+            print("Track \(index) already playing")
+            return
+        }
+        currentTrackIndex = index
+        let localPath = playlistLocalPaths[index]
+        guard !localPath.isEmpty, let musicFile = musicFiles[index] else {
+            print("Track not preloaded: \(playlistUrls[index])")
+            eventSink?(["type": "error", "message": "Track not preloaded: \(playlistUrls[index])"])
+            return
+        }
+        self.musicFile = musicFile
+        musicPlayerNode.stop()
+        musicPlayerNode.scheduleFile(musicFile, at: nil, completionHandler: { [weak self] in
+            guard let self = self, self.musicIsPlaying else { return }
+            if self.loopMode == "track" {
+                self.playTrackAtIndex(index)
+                print("Looped track: \(index)")
+            } else if self.loopMode == "playlist" {
+                let nextIndex = (index + 1) % self.playlistUrls.count
+                self.playTrackAtIndex(nextIndex)
+                print("Advanced to next track: \(nextIndex)")
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self, let sink = self.eventSink else { return }
+                let duration = Double(musicFile.length) / musicFile.processingFormat.sampleRate
+                print("Track \(index) ended, emitting position=0")
+                sink(["type": "music_position", "position": 0.0, "duration": duration])
+            }
+        })
+        if !audioEngine.isRunning {
+            do {
+                try audioEngine.start()
+                print("Started audioEngine")
+            } catch {
+                print("Failed to start audio engine: \(error)")
+                eventSink?(["type": "error", "message": "Failed to start audio engine"])
+            }
+        }
+        musicPlayerNode.play()
+        musicIsPlaying = true
+        startEmittingMusicPosition()
+        emitMusicIsPlaying()
+        let duration = Double(musicFile.length) / musicFile.processingFormat.sampleRate
+        DispatchQueue.main.async { [weak self] in
+            self?.eventSink?(["type": "music_position", "position": 0.0, "duration": duration])
+        }
+        print("Started playing track: \(index), path: \(localPath)")
     }
 }

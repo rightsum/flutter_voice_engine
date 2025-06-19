@@ -184,15 +184,8 @@ class FlutterVoiceEngine {
     });
   }
 
-  Future playBackgroundMusicPlaylist(
-    List sources, {
-    String loopMode = 'none',
-  }) async {
-    if (!isInitialized) throw Exception('VoiceEngine not initialized');
-    await _channel.invokeMethod('playBackgroundMusicPlaylist', {
-      'sources': sources,
-      'loopMode': loopMode,
-    });
+  Future<void> setMusicPlaylist(List<String> urls) async {
+    await _channel.invokeMethod('setMusicPlaylist', {'urls': urls});
   }
 
   Future stopBackgroundMusic() async {
@@ -202,6 +195,20 @@ class FlutterVoiceEngine {
     print('Flutter: Stopping background music');
     await _channel.invokeMethod('stopBackgroundMusic');
   }
+
+  Future<void> playTrackAtIndex(int index) async {
+    try {
+      await _channel.invokeMethod('playTrackAtIndex', {'index': index});
+    } catch (e) {
+      print('Failed to play track at index $index: $e');
+    }
+  }
+
+
+  Future<void> playBackgroundMusicPlaylist(List<String> sources, {String loopMode = 'none'}) async {
+    await _channel.invokeMethod('playBackgroundMusicPlaylist', {'sources': sources, 'loopMode': loopMode});
+  }
+
 
   Future setBackgroundMusicVolume(double volume) async {
     if (!isInitialized) throw Exception('VoiceEngine not initialized');

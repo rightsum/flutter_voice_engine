@@ -124,6 +124,22 @@ public class FlutterVoiceEnginePlugin: NSObject, FlutterPlugin, FlutterStreamHan
             }
             audioManager.seekBackgroundMusic(to: position)
             result(nil)
+        case "playTrackAtIndex":
+            guard let args = call.arguments as? [String: Any],
+                  let index = args["index"] as? Int else {
+                result(FlutterError(code: "INVALID_ARG", message: "Invalid index", details: nil))
+                return
+            }
+            audioManager.playTrackAtIndex(index)
+            result(nil)
+        case "setMusicPlaylist":
+            guard let args = call.arguments as? [String: Any],
+                  let urls = args["urls"] as? [String] else {
+                result(FlutterError(code: "INVALID_ARG", message: "Invalid playlist URLs", details: nil))
+                return
+            }
+            audioManager.setMusicPlaylist(urls)
+            result(nil)
         case "shutdownBot":
             shutdownBot(result: result)
         case "shutdownAll":
