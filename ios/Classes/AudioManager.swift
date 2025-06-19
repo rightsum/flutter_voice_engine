@@ -1,9 +1,13 @@
 import AVFoundation
 import Combine
 import CommonCrypto
+import Flutter
 
 
 public class AudioManager {
+    
+    // Voice Bot Related
+    
     private let audioEngine = AVAudioEngine()
     private let playerNode = AVAudioPlayerNode()
     private var inputNode: AVAudioInputNode { audioEngine.inputNode }
@@ -20,6 +24,8 @@ public class AudioManager {
     private var cancellables = Set<AnyCancellable>()
     private let targetSampleRate: Float64 = 24000
     
+    // Background Music Related
+    
     private let musicPlayerNode = AVAudioPlayerNode()
     private var musicFile: AVAudioFile?
     private var musicIsPlaying = false
@@ -28,7 +34,15 @@ public class AudioManager {
     private var playlistLocalPaths: [String] = []
     private var currentTrackIndex: Int = 0
     private var loopMode: String = "none" // "none", "track", "playlist"
+    
+    // Stream for position tracking
 
+    private var musicPositionTimer: Timer?
+    public var positionEventSink: FlutterEventSink?
+    
+    // Stream for music state tracking
+    
+    public var musicStateEventSink: FlutterEventSink?
 
     public init(
         channels: UInt32 = 1,
@@ -128,6 +142,71 @@ public class AudioManager {
         }
     }
     
+    public func emitMusicIsPlaying() {
+        musicStateEventSink?(musicIsPlaying)
+    }
+    
+    public func setBackgroundMusicVolume(_ volume: Float) {
+        musicPlayerNode.volume = volume
+    }
+
+    public func getBackgroundMusicVolume() -> Float {
+        return musicPlayerNode.volume
+    }
+    
+    public func seekBackgroundMusic(to position: Double) {
+        guard let musicFile = musicFile else { return }
+        let sampleRate = musicFile.processingFormat.sampleRate
+        let framePosition = AVAudioFramePosition(position * sampleRate)
+        // Properly reset node
+        musicPlayerNode.stop()
+        // Remove any pending scheduled files
+        musicPlayerNode.reset()
+        // Schedule from new position
+        musicPlayerNode.scheduleSegment(
+            musicFile,
+            startingFrame: framePosition,
+            frameCount: AVAudioFrameCount(musicFile.length - framePosition),
+            at: nil,
+            completionHandler: nil
+        )
+        musicPlayerNode.play()
+        musicIsPlaying = true
+        emitMusicIsPlaying()
+        // Optionally, immediately emit position update
+        emitMusicPosition()
+        print("Music seeked to \(position) seconds, resumed playback.")
+    }
+
+    
+    // Start emitting position & duration every 200ms (or whatever feels smooth)
+    public func startEmittingMusicPosition() {
+        stopEmittingMusicPosition()
+        musicPositionTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+            self?.emitMusicPosition()
+        }
+    }
+
+    public func stopEmittingMusicPosition() {
+        musicPositionTimer?.invalidate()
+        musicPositionTimer = nil
+    }
+
+    private func emitMusicPosition() {
+        guard let musicFile = musicFile else { return }
+        let duration = Double(musicFile.length) / musicFile.processingFormat.sampleRate
+        let position: Double
+
+        if let nodeTime = musicPlayerNode.lastRenderTime,
+           let playerTime = musicPlayerNode.playerTime(forNodeTime: nodeTime) {
+            position = Double(playerTime.sampleTime) / playerTime.sampleRate
+        } else {
+            position = 0
+        }
+        // Send as a map
+        positionEventSink?(["position": position, "duration": duration])
+    }
+    
     private func isRemoteURL(_ source: String) -> Bool {
         return source.lowercased().hasPrefix("http://") || source.lowercased().hasPrefix("https://")
     }
@@ -181,6 +260,7 @@ public class AudioManager {
                 }
                 self.musicPlayerNode.play()
                 self.musicIsPlaying = true
+                musicStateEventSink?(true)
                 print("Background music started: \(localPath)")
             } catch {
                 print("Failed to play music: \(error)")
@@ -229,6 +309,7 @@ public class AudioManager {
         playlist = []
         playlistLocalPaths = []
         currentTrackIndex = 0
+        musicStateEventSink?(false)
         print("Background music stopped")
     }
 

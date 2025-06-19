@@ -1,12 +1,15 @@
 import 'dart:async';
 import 'dart:typed_data';
 import 'package:flutter/services.dart';
+import '../platform/flutter_voice_engine_platform_interface.dart';
 import 'audio_config.dart';
 import 'audio_session_config.dart';
 
 class FlutterVoiceEngine {
   static const MethodChannel _channel = MethodChannel('flutter_voice_engine');
-  static const EventChannel _audioChunkChannel = EventChannel('flutter_voice_engine/audio_chunk');
+  static const EventChannel _audioChunkChannel = EventChannel(
+    'flutter_voice_engine/audio_chunk',
+  );
 
   AudioConfig audioConfig = AudioConfig();
   AudioSessionConfig sessionConfig = AudioSessionConfig();
@@ -17,7 +20,7 @@ class FlutterVoiceEngine {
 
   FlutterVoiceEngine() {
     _audioChunkChannel.receiveBroadcastStream().listen(
-          (dynamic data) {
+      (dynamic data) {
         if (data is Uint8List) {
           print('Flutter: Received audio chunk, size: ${data.length} bytes');
           _audioChunkController.add(data);
@@ -78,9 +81,7 @@ class FlutterVoiceEngine {
     }
     try {
       print('Flutter: Playing audio chunk, size: ${audioData.length} bytes');
-      await _channel.invokeMethod('playAudioChunk', {
-        'audioData': audioData,
-      });
+      await _channel.invokeMethod('playAudioChunk', {'audioData': audioData});
     } catch (e) {
       print('Flutter: Playback failed: $e');
       rethrow;
@@ -95,6 +96,7 @@ class FlutterVoiceEngine {
     print('Flutter: Stopping playback');
     await _channel.invokeMethod('stopPlayback');
   }
+
   Future<void> shutdownBot() async {
     if (!isInitialized) {
       print('Flutter: Not initialized');
@@ -131,7 +133,10 @@ class FlutterVoiceEngine {
 
   /// Plays a playlist of music files or URLs with given loop mode.
   /// [loopMode] can be 'none', 'track', or 'playlist'.
-  Future<void> playBackgroundMusicPlaylist(List<String> sources, {String loopMode = 'none'}) async {
+  Future<void> playBackgroundMusicPlaylist(
+    List<String> sources, {
+    String loopMode = 'none',
+  }) async {
     if (!isInitialized) throw Exception('VoiceEngine not initialized');
     await _channel.invokeMethod('playBackgroundMusicPlaylist', {
       'sources': sources,
@@ -140,6 +145,7 @@ class FlutterVoiceEngine {
   }
 
   /// Stop the background music.
+
   Future<void> stopBackgroundMusic() async {
     if (!isInitialized) {
       throw Exception('VoiceEngine not initialized');
@@ -147,5 +153,30 @@ class FlutterVoiceEngine {
     print('Flutter: Stopping background music');
     await _channel.invokeMethod('stopBackgroundMusic');
   }
+  Future<void> setBackgroundMusicVolume(double volume) async {
+    if (!isInitialized) throw Exception('VoiceEngine not initialized');
+    await _channel.invokeMethod('setBackgroundMusicVolume', {'volume': volume});
+  }
 
+  Future<double> getBackgroundMusicVolume() async {
+    if (!isInitialized) throw Exception('VoiceEngine not initialized');
+    final vol = await _channel.invokeMethod('getBackgroundMusicVolume');
+    return (vol as num).toDouble();
+  }
+
+  Future<void> seekBackgroundMusic(Duration position) async {
+    if (!isInitialized) throw Exception('VoiceEngine not initialized');
+    await _channel.invokeMethod('seekBackgroundMusic', {
+      'position': position.inMilliseconds / 1000.0,
+    });
+  }
+
+  Stream<Duration> get backgroundMusicDurationStream =>
+      FlutterVoiceEnginePlatform.instance.backgroundMusicDurationStream;
+
+  Stream<Duration> get backgroundMusicPositionStream =>
+      FlutterVoiceEnginePlatform.instance.backgroundMusicPositionStream;
+
+  Stream<bool> get backgroundMusicIsPlayingStream =>
+      FlutterVoiceEnginePlatform.instance.backgroundMusicIsPlayingStream;
 }

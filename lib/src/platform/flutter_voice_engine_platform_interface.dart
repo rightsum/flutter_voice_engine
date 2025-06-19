@@ -15,6 +15,10 @@ abstract class FlutterVoiceEnginePlatform extends PlatformInterface {
     _instance = instance;
   }
 
+  Stream<Duration> get backgroundMusicPositionStream;
+  Stream<Duration> get backgroundMusicDurationStream;
+  Stream<bool> get backgroundMusicIsPlayingStream;
+
   Future<void> initialize(
       AudioConfig config,
       AudioSessionConfig sessionConfig,
