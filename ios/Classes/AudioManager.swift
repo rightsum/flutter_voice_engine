@@ -3,11 +3,8 @@ import Combine
 import CommonCrypto
 import Flutter
 
-
 public class AudioManager {
-    
     // Voice Bot Related
-    
     private let audioEngine = AVAudioEngine()
     private let playerNode = AVAudioPlayerNode()
     private var inputNode: AVAudioInputNode { audioEngine.inputNode }
@@ -23,26 +20,19 @@ public class AudioManager {
     private let enableAEC: Bool
     private var cancellables = Set<AnyCancellable>()
     private let targetSampleRate: Float64 = 24000
-    
+
     // Background Music Related
-    
     private let musicPlayerNode = AVAudioPlayerNode()
     private var musicFile: AVAudioFile?
-    private var musicIsPlaying = false
-    
+    public var musicIsPlaying = false
     private var playlist: [String] = []
     private var playlistLocalPaths: [String] = []
     private var currentTrackIndex: Int = 0
     private var loopMode: String = "none" // "none", "track", "playlist"
-    
-    // Stream for position tracking
 
+    // Stream for all events
     private var musicPositionTimer: Timer?
-    public var positionEventSink: FlutterEventSink?
-    
-    // Stream for music state tracking
-    
-    public var musicStateEventSink: FlutterEventSink?
+    public var eventSink: FlutterEventSink?
 
     public init(
         channels: UInt32 = 1,
@@ -69,7 +59,7 @@ public class AudioManager {
             try session.setActive(true, options: [.notifyOthersOnDeactivation])
             let appliedOptions = session.categoryOptions.rawValue
             print("Audio session configured: sampleRate=\(session.sampleRate), channels=\(session.outputNumberOfChannels), inputGain=\(session.inputGain), options=\(appliedOptions), bufferDuration=\(session.ioBufferDuration)")
-            print("Expected options: defaultToSpeaker=8, duckOthers=32, allowBluetoothA2DP=4, Total=44")
+            print("Expected options: defaultToSpeaker=8, mixWithOthers=32, allowBluetoothA2DP=4, Total=44")
             if appliedOptions != 44 {
                 print("Warning: Options mismatch, expected 44, got \(appliedOptions)")
                 try session.setCategory(.playAndRecord, mode: .spokenAudio, options: [.defaultToSpeaker])
@@ -80,16 +70,15 @@ public class AudioManager {
             errorPublisher.send("Audio session error: \(error.localizedDescription)")
         }
 
-        let actualSampleRate = session.sampleRate
         self.inputFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
-            sampleRate: actualSampleRate,
+            sampleRate: session.sampleRate,
             channels: channels,
             interleaved: true
         )!
         self.audioFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
-            sampleRate: actualSampleRate,
+            sampleRate: session.sampleRate,
             channels: 2,
             interleaved: false
         )!
@@ -107,22 +96,20 @@ public class AudioManager {
         playbackConverter = AVAudioConverter(from: webSocketFormat, to: audioFormat)
         if recordingConverter == nil || playbackConverter == nil {
             errorPublisher.send("Failed to initialize audio converters")
+            DispatchQueue.main.async { [weak self] in
+                self?.eventSink?(["type": "error", "message": "Failed to initialize audio converters"])
+            }
         } else {
             print("Converters initialized: recording=\(inputFormat)->\(webSocketFormat), playback=\(webSocketFormat)->\(audioFormat)")
         }
     }
 
     public func setupEngine() {
-        // Attach audio nodes
-        audioEngine.attach(playerNode)        // Bot playback
-        audioEngine.attach(musicPlayerNode)   // Background music playback
-
-        // Connect nodes to main mixer
+        audioEngine.attach(playerNode)
+        audioEngine.attach(musicPlayerNode)
         audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: audioFormat)
         audioEngine.connect(musicPlayerNode, to: audioEngine.mainMixerNode, format: audioFormat)
         audioEngine.connect(audioEngine.mainMixerNode, to: audioEngine.outputNode, format: audioFormat)
-        
-        // Set mixer output volume if needed
         audioEngine.mainMixerNode.outputVolume = 1.0
 
         let session = AVAudioSession.sharedInstance()
@@ -139,13 +126,23 @@ public class AudioManager {
         } catch {
             print("Failed to start audio engine or enable AEC: \(error)")
             errorPublisher.send("Engine error: \(error.localizedDescription)")
+            DispatchQueue.main.async { [weak self] in
+                self?.eventSink?(["type": "error", "message": "Engine error: \(error.localizedDescription)"])
+            }
         }
     }
-    
+
     public func emitMusicIsPlaying() {
-        musicStateEventSink?(musicIsPlaying)
+        DispatchQueue.main.async { [weak self] in
+            guard let sink = self?.eventSink else {
+                print("eventSink is nil, cannot send music state")
+                return
+            }
+            print("Emitting music state: \(self?.musicIsPlaying ?? false)")
+            sink(["type": "music_state", "state": self?.musicIsPlaying ?? false])
+        }
     }
-    
+
     public func setBackgroundMusicVolume(_ volume: Float) {
         musicPlayerNode.volume = volume
     }
@@ -153,66 +150,97 @@ public class AudioManager {
     public func getBackgroundMusicVolume() -> Float {
         return musicPlayerNode.volume
     }
-    
-    public func seekBackgroundMusic(to position: Double) {
-        guard let musicFile = musicFile else { return }
-        let sampleRate = musicFile.processingFormat.sampleRate
-        let framePosition = AVAudioFramePosition(position * sampleRate)
-        // Properly reset node
-        musicPlayerNode.stop()
-        // Remove any pending scheduled files
-        musicPlayerNode.reset()
-        // Schedule from new position
-        musicPlayerNode.scheduleSegment(
-            musicFile,
-            startingFrame: framePosition,
-            frameCount: AVAudioFrameCount(musicFile.length - framePosition),
-            at: nil,
-            completionHandler: nil
-        )
-        musicPlayerNode.play()
-        musicIsPlaying = true
-        emitMusicIsPlaying()
-        // Optionally, immediately emit position update
-        emitMusicPosition()
-        print("Music seeked to \(position) seconds, resumed playback.")
-    }
 
-    
-    // Start emitting position & duration every 200ms (or whatever feels smooth)
-    public func startEmittingMusicPosition() {
-        stopEmittingMusicPosition()
-        musicPositionTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
-            self?.emitMusicPosition()
+    public func seekBackgroundMusic(to position: Double) {
+        guard let musicFile = musicFile else {
+            print("No music file, cannot seek")
+            eventSink?(["type": "error", "message": "No music file loaded for seeking"])
+            return
+        }
+        let sampleRate = musicFile.processingFormat.sampleRate
+        let duration = Double(musicFile.length) / sampleRate
+        let clampedPosition = max(0, min(position, duration)) // Clamp to valid range
+        let framePosition = AVAudioFramePosition(clampedPosition * sampleRate)
+        
+        // Preserve playback state
+        let wasPlaying = musicPlayerNode.isPlaying
+        
+        // Schedule segment at next render time
+        let frameCount = AVAudioFrameCount(musicFile.length - framePosition)
+        if frameCount > 0 {
+            // Pause briefly to queue new segment
+            if wasPlaying {
+                musicPlayerNode.pause()
+            }
+            musicPlayerNode.scheduleSegment(
+                musicFile,
+                startingFrame: framePosition,
+                frameCount: frameCount,
+                at: AVAudioTime(hostTime: mach_absolute_time()), // Start immediately
+                completionHandler: musicIsPlaying && loopMode == "track" ? { [weak self] in
+                    guard let self = self else { return }
+                    self.playBackgroundMusic(source: musicFile.url.path, loop: true)
+                    print("Music looped after seek.")
+                } : nil
+            )
+            // Resume playback
+            if wasPlaying {
+                if !audioEngine.isRunning {
+                    do {
+                        try audioEngine.start()
+                        print("Started audioEngine for seek playback.")
+                    } catch {
+                        print("Failed to start audio engine: \(error)")
+                        eventSink?(["type": "error", "message": "Failed to start audio engine: \(error.localizedDescription)"])
+                    }
+                }
+                musicPlayerNode.play()
+                musicIsPlaying = true
+            }
+        } else {
+            // Handle edge case: seek to end
+            if wasPlaying {
+                musicPlayerNode.pause()
+            }
+            musicPlayerNode.scheduleFile(musicFile, at: nil, completionHandler: nil)
+            musicIsPlaying = false
+            emitMusicIsPlaying()
+            print("Seeked to end, music paused.")
+        }
+        
+        // Emit updated position
+        DispatchQueue.main.async { [weak self] in
+            guard let sink = self?.eventSink else {
+                print("eventSink is nil, cannot send position")
+                return
+            }
+            print("Seeked to position: \(clampedPosition), duration: \(duration)")
+            sink(["type": "music_position", "position": clampedPosition, "duration": duration])
         }
     }
 
+    public func startEmittingMusicPosition() {
+        stopEmittingMusicPosition()
+        print("Starting music position timer")
+        musicPositionTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.emitMusicPosition()
+            }
+        }
+        RunLoop.main.add(musicPositionTimer!, forMode: .common)
+    }
+
     public func stopEmittingMusicPosition() {
+        print("Stopping music position timer")
         musicPositionTimer?.invalidate()
         musicPositionTimer = nil
     }
 
-    private func emitMusicPosition() {
-        guard let musicFile = musicFile else { return }
-        let duration = Double(musicFile.length) / musicFile.processingFormat.sampleRate
-        let position: Double
-
-        if let nodeTime = musicPlayerNode.lastRenderTime,
-           let playerTime = musicPlayerNode.playerTime(forNodeTime: nodeTime) {
-            position = Double(playerTime.sampleTime) / playerTime.sampleRate
-        } else {
-            position = 0
-        }
-        // Send as a map
-        positionEventSink?(["position": position, "duration": duration])
-    }
     
     private func isRemoteURL(_ source: String) -> Bool {
         return source.lowercased().hasPrefix("http://") || source.lowercased().hasPrefix("https://")
     }
 
-    /// Downloads a file from a URL to a unique temp file, returns the local path.
-    /// Uses MD5 hash of URL for unique file caching.
     private func downloadToTemp(_ urlStr: String, completion: @escaping (String?) -> Void) {
         guard let url = URL(string: urlStr) else { completion(nil); return }
         let tempDir = FileManager.default.temporaryDirectory
@@ -227,13 +255,15 @@ public class AudioManager {
                 try? FileManager.default.moveItem(at: tempURL, to: URL(fileURLWithPath: localPath))
                 completion(localPath)
             } else {
+                DispatchQueue.main.async { [weak self] in
+                    self?.eventSink?(["type": "error", "message": "Failed to download music from \(urlStr)"])
+                }
                 completion(nil)
             }
         }
         task.resume()
     }
-    
-    /// Simple md5 hash for filename uniqueness
+
     private func md5(_ string: String) -> String {
         let data = Data(string.utf8)
         var digest = [UInt8](repeating: 0, count: Int(CC_MD5_DIGEST_LENGTH))
@@ -243,7 +273,6 @@ public class AudioManager {
         return digest.map { String(format: "%02hhx", $0) }.joined()
     }
 
-    /// Plays music from a local file path, asset, or remote URL. Handles looping.
     public func playBackgroundMusic(source: String, loop: Bool = true) {
         stopBackgroundMusic()
         let play: (String) -> Void = { [weak self] localPath in
@@ -251,91 +280,152 @@ public class AudioManager {
             do {
                 self.musicFile = try AVAudioFile(forReading: URL(fileURLWithPath: localPath))
                 guard let musicFile = self.musicFile else { return }
-                self.musicPlayerNode.scheduleFile(musicFile, at: nil, completionHandler: loop ? { [weak self] in
-                    guard let self = self else { return }
-                    self.playBackgroundMusic(source: localPath, loop: loop)
-                } : nil)
+                let scheduleFile: () -> Void = {
+                    self.musicPlayerNode.scheduleFile(musicFile, at: nil, completionHandler: loop ? { [weak self] in
+                        guard let self = self, self.musicIsPlaying else { return }
+                        self.musicPlayerNode.scheduleFile(musicFile, at: nil, completionHandler: loop ? { [weak self] in
+                            self?.playBackgroundMusic(source: localPath, loop: loop)
+                            print("Music looped, rescheduling.")
+                        } : nil)
+                        if self.musicPlayerNode.isPlaying {
+                            self.musicPlayerNode.play()
+                        }
+                        DispatchQueue.main.async { [weak self] in
+                            guard let self = self, let sink = self.eventSink else { return }
+                            let duration = Double(musicFile.length) / musicFile.processingFormat.sampleRate
+                            print("Music looped, emitting position=0")
+                            sink(["type": "music_position", "position": 0.0, "duration": duration])
+                        }
+                        print("Music looped, restarted playback.")
+                    } : nil)
+                }
+                if !self.audioEngine.attachedNodes.contains(self.musicPlayerNode) {
+                    self.audioEngine.attach(self.musicPlayerNode)
+                    self.audioEngine.connect(self.musicPlayerNode, to: self.audioEngine.mainMixerNode, format: self.audioFormat)
+                    print("Reattached musicPlayerNode for playback.")
+                }
                 if !self.audioEngine.isRunning {
                     try self.audioEngine.start()
+                    print("Started audioEngine for playback.")
                 }
+                scheduleFile()
                 self.musicPlayerNode.play()
                 self.musicIsPlaying = true
-                musicStateEventSink?(true)
+                self.emitMusicIsPlaying()
+                self.startEmittingMusicPosition()
                 print("Background music started: \(localPath)")
             } catch {
                 print("Failed to play music: \(error)")
+                DispatchQueue.main.async { [weak self] in
+                    self?.eventSink?(["type": "error", "message": "Failed to play music: \(error.localizedDescription)"])
+                }
             }
         }
         if isRemoteURL(source) {
-            // Download, then play
             downloadToTemp(source) { localPath in
                 DispatchQueue.main.async {
                     if let path = localPath {
                         play(path)
-                    } else {
-                        print("Failed to download music from \(source)")
                     }
                 }
             }
         } else if FileManager.default.fileExists(atPath: source) {
-            // Local file, play directly
             play(source)
         } else if let bundlePath = Bundle.main.path(forResource: source, ofType: nil) {
-            // Asset in bundle (if you copied it to bundle at build time)
             play(bundlePath)
         } else {
             print("AudioManager: Source not found: \(source)")
+            DispatchQueue.main.async { [weak self] in
+                self?.eventSink?(["type": "error", "message": "Source not found: \(source)"])
+            }
         }
     }
 
-    
-    public func stopBackgroundMusic() {
-        // Is the engine running and node attached?
-        guard audioEngine.isRunning, audioEngine.attachedNodes.contains(musicPlayerNode) else {
-            musicIsPlaying = false
-            playlist = []
-            playlistLocalPaths = []
-            currentTrackIndex = 0
-            print("Background music stopped (engine not running or node detached)")
+    private func emitMusicPosition() {
+        guard let musicFile = musicFile else {
+            print("No music file, cannot emit position")
             return
         }
-        // Check if the node is actually playing before stopping
+        let duration = Double(musicFile.length) / musicFile.processingFormat.sampleRate
+        var position: Double = 0.0
+        if let nodeTime = musicPlayerNode.lastRenderTime,
+           let playerTime = musicPlayerNode.playerTime(forNodeTime: nodeTime),
+           playerTime.sampleRate > 0 {
+            position = Double(playerTime.sampleTime) / playerTime.sampleRate
+            // Normalize position to [0, duration] for looping
+            if position > duration {
+                position = position.truncatingRemainder(dividingBy: duration)
+            }
+        }
+        DispatchQueue.main.async { [weak self] in
+            guard let sink = self?.eventSink else {
+                print("eventSink is nil, cannot send position")
+                return
+            }
+            print("Emitting music position: position=\(position), duration=\(duration)")
+            sink(["type": "music_position", "position": position, "duration": duration])
+        }
+    }
+
+    public func stopBackgroundMusic() {
+        if !audioEngine.isRunning {
+            do {
+                try audioEngine.start()
+                print("Started audioEngine for music control.")
+            } catch {
+                print("Failed to start audio engine: \(error)")
+                eventSink?(["type": "error", "message": "Failed to start audio engine: \(error.localizedDescription)"])
+            }
+        }
+        if !audioEngine.attachedNodes.contains(musicPlayerNode) {
+            audioEngine.attach(musicPlayerNode)
+            audioEngine.connect(musicPlayerNode, to: audioEngine.mainMixerNode, format: audioFormat)
+            print("Reattached musicPlayerNode for pause control.")
+        }
         if musicPlayerNode.isPlaying {
             musicPlayerNode.pause()
+            musicIsPlaying = false
+            stopEmittingMusicPosition()
+            emitMusicIsPlaying()
+            print("Background music paused")
         } else {
-            print("Background music node was not playing, skipping stop()")
+            musicIsPlaying = false
+            stopEmittingMusicPosition()
+            emitMusicIsPlaying()
+            print("Background music already paused, updated state")
         }
-        musicIsPlaying = false
         playlist = []
         playlistLocalPaths = []
         currentTrackIndex = 0
-        musicStateEventSink?(false)
-        print("Background music stopped")
     }
-
-
 
     private func installRecordingTap() {
         let bus = 0
         inputNode.installTap(onBus: bus, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
             guard let self = self, let converter = self.recordingConverter else {
                 self?.errorPublisher.send("Recording converter unavailable")
+                DispatchQueue.main.async { [weak self] in
+                    self?.eventSink?(["type": "error", "message": "Recording converter unavailable"])
+                }
                 return
             }
             let amplitude = buffer.floatChannelData?.pointee.withMemoryRebound(to: Float.self, capacity: Int(buffer.frameLength)) { ptr in
                 (0..<Int(buffer.frameLength)).reduce(0.0) { max($0, abs(ptr[$1])) }
             } ?? 0
-            print("Input amplitude: \(amplitude)")
-            if amplitude < self.amplitudeThreshold && self.playerNode.isPlaying {
-                print("Skipping low-amplitude chunk during playback (possible echo)")
-                return
-            }
+            // Temporarily bypass amplitude check for debugging
+            // if amplitude < self.amplitudeThreshold && self.playerNode.isPlaying {
+            //     print("Skipping low-amplitude chunk during playback (possible echo)")
+            //     return
+            // }
             let frameCapacity = UInt32(round(Double(buffer.frameLength) * converter.outputFormat.sampleRate / buffer.format.sampleRate))
             guard let outputBuffer = AVAudioPCMBuffer(
                 pcmFormat: converter.outputFormat,
                 frameCapacity: frameCapacity
             ) else {
                 self.errorPublisher.send("Failed to create output buffer")
+                DispatchQueue.main.async { [weak self] in
+                    self?.eventSink?(["type": "error", "message": "Failed to create output buffer"])
+                }
                 return
             }
             var error: NSError?
@@ -345,17 +435,26 @@ public class AudioManager {
             }
             if let error = error {
                 self.errorPublisher.send("Recording conversion error: \(error.localizedDescription)")
+                DispatchQueue.main.async { [weak self] in
+                    self?.eventSink?(["type": "error", "message": "Recording conversion error: \(error.localizedDescription)"])
+                }
                 return
             }
             if status == .error {
                 self.errorPublisher.send("Recording conversion failed")
+                DispatchQueue.main.async { [weak self] in
+                    self?.eventSink?(["type": "error", "message": "Recording conversion failed"])
+                }
                 return
             }
             if let data = outputBuffer.int16ChannelData?.pointee {
                 let byteCount = Int(outputBuffer.frameLength) * MemoryLayout<Int16>.size * Int(outputBuffer.format.channelCount)
                 let audioData = Data(bytes: data, count: byteCount)
-                print("Sending audio chunk, size: \(audioData.count) bytes")
                 self.audioChunkPublisher.send(audioData)
+            } else {
+                DispatchQueue.main.async { [weak self] in
+                    self?.eventSink?(["type": "error", "message": "No audio data in output buffer"])
+                }
             }
         }
     }
@@ -418,7 +517,7 @@ public class AudioManager {
         playerNode.reset()
         print("Playback stopped")
     }
-    
+
     public func playBackgroundMusicPlaylist(sources: [String], loopMode: String = "none") {
         stopBackgroundMusic()
         playlist = sources
@@ -427,7 +526,7 @@ public class AudioManager {
         self.loopMode = loopMode
         prepareNextTrack(start: true)
     }
-    
+
     private func prepareNextTrack(start: Bool = false) {
         guard currentTrackIndex < playlist.count else {
             if loopMode == "playlist" && !playlist.isEmpty {
@@ -441,6 +540,9 @@ public class AudioManager {
             downloadToTemp(source) { [weak self] localPath in
                 guard let self = self, let path = localPath else {
                     print("Download failed for \(source)")
+                    DispatchQueue.main.async { [weak self] in
+                        self?.eventSink?(["type": "error", "message": "Download failed for \(source)"])
+                    }
                     return
                 }
                 DispatchQueue.main.async {
@@ -451,7 +553,7 @@ public class AudioManager {
             playSingleTrack(localPath: source, start: start)
         }
     }
-    
+
     private func playSingleTrack(localPath: String, start: Bool = false) {
         do {
             musicFile = try AVAudioFile(forReading: URL(fileURLWithPath: localPath))
@@ -459,7 +561,7 @@ public class AudioManager {
             musicPlayerNode.scheduleFile(musicFile!, at: nil, completionHandler: { [weak self] in
                 guard let self = self else { return }
                 if self.loopMode == "track" {
-                    self.prepareNextTrack(start: true) // replays same track
+                    self.prepareNextTrack(start: true)
                 } else {
                     self.currentTrackIndex += 1
                     self.prepareNextTrack(start: true)
@@ -473,14 +575,31 @@ public class AudioManager {
             print("Playing music track: \(localPath)")
         } catch {
             print("Failed to play track \(localPath): \(error)")
+            DispatchQueue.main.async { [weak self] in
+                self?.eventSink?(["type": "error", "message": "Failed to play track \(localPath): \(error.localizedDescription)"])
+            }
         }
     }
 
     public func shutdownBot() {
         stopRecording()
         stopPlayback()
-        // Do NOT stop audioEngine or session, do NOT stop music
-        print("Bot stopped, music (if playing) continues.")
+        print("Bot stopped, music continues if playing.")
+        // Ensure musicPlayerNode and audioEngine remain controllable
+        if !audioEngine.attachedNodes.contains(musicPlayerNode) {
+            audioEngine.attach(musicPlayerNode)
+            audioEngine.connect(musicPlayerNode, to: audioEngine.mainMixerNode, format: audioFormat)
+            print("Reattached musicPlayerNode for continued control.")
+        }
+        if !audioEngine.isRunning {
+            do {
+                try audioEngine.start()
+                print("Restarted audioEngine for music control.")
+            } catch {
+                print("Failed to restart audio engine: \(error)")
+                eventSink?(["type": "error", "message": "Failed to restart audio engine: \(error.localizedDescription)"])
+            }
+        }
     }
 
     public func shutdownAll() {
@@ -493,10 +612,12 @@ public class AudioManager {
             try AVAudioSession.sharedInstance().setActive(false)
         } catch {
             print("Failed to deactivate audio session: \(error)")
+            DispatchQueue.main.async { [weak self] in
+                self?.eventSink?(["type": "error", "message": "Failed to deactivate audio session: \(error.localizedDescription)"])
+            }
         }
         print("AudioManager shutdown (bot + music)")
     }
-
 
     public func handleConfigurationChange() {
         print("Audio engine configuration changed")
@@ -511,6 +632,9 @@ public class AudioManager {
             } catch {
                 print("Failed to restart audio engine: \(error)")
                 errorPublisher.send("Engine restart failed: \(error.localizedDescription)")
+                DispatchQueue.main.async { [weak self] in
+                    self?.eventSink?(["type": "error", "message": "Engine restart failed: \(error.localizedDescription)"])
+                }
             }
         }
     }

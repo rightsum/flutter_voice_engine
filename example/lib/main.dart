@@ -29,7 +29,6 @@ class HomePage extends StatelessWidget {
       appBar: AppBar(title: const Text('Voice Engine Test')),
       body: BlocBuilder<SessionCubit, SessionState>(
         builder: (context, state) {
-          print('UI updated with state: $state');
           return Center(
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
@@ -161,6 +160,8 @@ class _MusicPlayerCardState extends State<MusicPlayerCard> {
                       ),
                       onPressed: () {
                         final cubit = context.read<SessionCubit>();
+
+                        print("Music button pressed, isPlaying: $isPlaying");
                         if (isPlaying) {
                           cubit.stopMusic();
                         } else {

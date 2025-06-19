@@ -7,8 +7,8 @@ import 'audio_session_config.dart';
 
 class FlutterVoiceEngine {
   static const MethodChannel _channel = MethodChannel('flutter_voice_engine');
-  static const EventChannel _audioChunkChannel = EventChannel(
-    'flutter_voice_engine/audio_chunk',
+  static const EventChannel _eventChannel = EventChannel(
+    'flutter_voice_engine/events',
   );
 
   AudioConfig audioConfig = AudioConfig();
@@ -16,30 +16,84 @@ class FlutterVoiceEngine {
   bool isInitialized = false;
   bool isRecording = false;
 
-  final _audioChunkController = StreamController<Uint8List>.broadcast();
+  final _audioChunkController = StreamController.broadcast();
+  final _musicPositionController =
+      StreamController<Map<String, dynamic>>.broadcast();
+  final _musicStateController = StreamController.broadcast();
+  final _errorController = StreamController.broadcast();
 
   FlutterVoiceEngine() {
-    _audioChunkChannel.receiveBroadcastStream().listen(
-      (dynamic data) {
-        if (data is Uint8List) {
-          print('Flutter: Received audio chunk, size: ${data.length} bytes');
-          _audioChunkController.add(data);
+    print('FlutterVoiceEngine: Constructor called');
+    _eventChannel.receiveBroadcastStream().listen(
+      (dynamic event) {
+        if (event is Map) {
+          final type = event['type'] as String?;
+          switch (type) {
+            case 'audio_chunk':
+              final data = event['data'];
+              if (data is Uint8List) {
+                _audioChunkController.add(data);
+              } else {
+                _errorController.add(
+                  'Invalid audio chunk data type: ${data.runtimeType}',
+                );
+              }
+              break;
+            case 'music_position':
+              final position = event['position'] as double?;
+              final duration = event['duration'] as double?;
+              if (position != null && duration != null) {
+                _musicPositionController.add({
+                  'position': position,
+                  'duration': duration,
+                });
+              } else {
+                _errorController.add('Invalid music position data: $event');
+              }
+              break;
+            case 'music_state':
+              final state = event['state'] as bool?;
+              if (state != null) {
+                print('Flutter: Received music state: $state');
+                _musicStateController.add(state);
+              } else {
+                print(
+                  'Flutter: Invalid music state data: ${event['state'].runtimeType}',
+                );
+                _errorController.add(
+                  'Invalid music state data: ${event['state'].runtimeType}',
+                );
+              }
+              break;
+            case 'error':
+              final message = event['message'] as String?;
+              if (message != null) {
+                _errorController.add(message);
+              }
+              break;
+            default:
+              _errorController.add('Unknown event type: $type');
+          }
         } else {
-          print('Flutter: Invalid audio chunk data type: ${data.runtimeType}');
+          _errorController.add('Invalid event data type: ${event.runtimeType}');
         }
       },
       onError: (error) {
-        print('Flutter: Audio chunk stream error: $error');
+        _errorController.add('Event stream error: $error');
       },
       onDone: () {
-        print('Flutter: Audio chunk stream closed');
+        _errorController.add('Event stream closed');
       },
     );
   }
 
-  Stream<Uint8List> get audioChunkStream => _audioChunkController.stream;
+  Stream get audioChunkStream => _audioChunkController.stream;
+  Stream<Map<String, dynamic>> get musicPositionStream =>
+      _musicPositionController.stream;
+  Stream get musicStateStream => _musicStateController.stream;
+  Stream get errorStream => _errorController.stream;
 
-  Future<void> initialize() async {
+  Future initialize() async {
     try {
       print('Flutter: Initializing VoiceEngine');
       await _channel.invokeMethod('initialize', {
@@ -56,7 +110,7 @@ class FlutterVoiceEngine {
     }
   }
 
-  Future<void> startRecording() async {
+  Future startRecording() async {
     if (!isInitialized) {
       throw Exception('VoiceEngine not initialized');
     }
@@ -65,7 +119,7 @@ class FlutterVoiceEngine {
     isRecording = true;
   }
 
-  Future<void> stopRecording() async {
+  Future stopRecording() async {
     if (!isInitialized || !isRecording) {
       print('Flutter: Not recording or not initialized');
       return;
@@ -75,7 +129,7 @@ class FlutterVoiceEngine {
     isRecording = false;
   }
 
-  Future<void> playAudioChunk(Uint8List audioData) async {
+  Future playAudioChunk(Uint8List audioData) async {
     if (!isInitialized) {
       throw Exception('VoiceEngine not initialized');
     }
@@ -88,7 +142,7 @@ class FlutterVoiceEngine {
     }
   }
 
-  Future<void> stopPlayback() async {
+  Future stopPlayback() async {
     if (!isInitialized) {
       print('Flutter: Not initialized');
       return;
@@ -97,19 +151,17 @@ class FlutterVoiceEngine {
     await _channel.invokeMethod('stopPlayback');
   }
 
-  Future<void> shutdownBot() async {
+  Future shutdownBot() async {
     if (!isInitialized) {
       print('Flutter: Not initialized');
       return;
     }
     print('Flutter: Shutting down only bot (music continues)');
     await _channel.invokeMethod('shutdownBot');
-    isInitialized = false;
     isRecording = false;
-    // Don't close _audioChunkController if you want to allow music events/interaction.
   }
 
-  Future<void> shutdownAll() async {
+  Future shutdownAll() async {
     if (!isInitialized) {
       print('Flutter: Not initialized');
       return;
@@ -119,11 +171,12 @@ class FlutterVoiceEngine {
     isInitialized = false;
     isRecording = false;
     await _audioChunkController.close();
+    await _musicPositionController.close();
+    await _musicStateController.close();
+    await _errorController.close();
   }
 
-  /// Play background music from a local file path.
-  /// Set [loop] to true to loop the music.
-  Future<void> playBackgroundMusic(String source, {bool loop = true}) async {
+  Future playBackgroundMusic(String source, {bool loop = true}) async {
     if (!isInitialized) throw Exception('VoiceEngine not initialized');
     await _channel.invokeMethod('playBackgroundMusic', {
       'source': source,
@@ -131,10 +184,8 @@ class FlutterVoiceEngine {
     });
   }
 
-  /// Plays a playlist of music files or URLs with given loop mode.
-  /// [loopMode] can be 'none', 'track', or 'playlist'.
-  Future<void> playBackgroundMusicPlaylist(
-    List<String> sources, {
+  Future playBackgroundMusicPlaylist(
+    List sources, {
     String loopMode = 'none',
   }) async {
     if (!isInitialized) throw Exception('VoiceEngine not initialized');
@@ -144,39 +195,39 @@ class FlutterVoiceEngine {
     });
   }
 
-  /// Stop the background music.
-
-  Future<void> stopBackgroundMusic() async {
+  Future stopBackgroundMusic() async {
     if (!isInitialized) {
       throw Exception('VoiceEngine not initialized');
     }
     print('Flutter: Stopping background music');
     await _channel.invokeMethod('stopBackgroundMusic');
   }
-  Future<void> setBackgroundMusicVolume(double volume) async {
+
+  Future setBackgroundMusicVolume(double volume) async {
     if (!isInitialized) throw Exception('VoiceEngine not initialized');
     await _channel.invokeMethod('setBackgroundMusicVolume', {'volume': volume});
   }
 
-  Future<double> getBackgroundMusicVolume() async {
+  Future getBackgroundMusicVolume() async {
     if (!isInitialized) throw Exception('VoiceEngine not initialized');
     final vol = await _channel.invokeMethod('getBackgroundMusicVolume');
     return (vol as num).toDouble();
   }
 
-  Future<void> seekBackgroundMusic(Duration position) async {
+  Future seekBackgroundMusic(Duration position) async {
     if (!isInitialized) throw Exception('VoiceEngine not initialized');
     await _channel.invokeMethod('seekBackgroundMusic', {
       'position': position.inMilliseconds / 1000.0,
     });
   }
 
-  Stream<Duration> get backgroundMusicDurationStream =>
-      FlutterVoiceEnginePlatform.instance.backgroundMusicDurationStream;
+  Stream get backgroundMusicDurationStream => musicPositionStream.map(
+    (event) => Duration(milliseconds: (event['duration'] * 1000).round()),
+  );
 
-  Stream<Duration> get backgroundMusicPositionStream =>
-      FlutterVoiceEnginePlatform.instance.backgroundMusicPositionStream;
+  Stream get backgroundMusicPositionStream => musicPositionStream.map(
+    (event) => Duration(milliseconds: (event['position'] * 1000).round()),
+  );
 
-  Stream<bool> get backgroundMusicIsPlayingStream =>
-      FlutterVoiceEnginePlatform.instance.backgroundMusicIsPlayingStream;
+  Stream get backgroundMusicIsPlayingStream => musicStateStream;
 }
