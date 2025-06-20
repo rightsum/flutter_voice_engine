@@ -160,30 +160,30 @@ public class AudioManager {
 
     
     public func startEmittingMusicPosition() {
-        // Tear down any existing timer
-        stopEmittingMusicPosition()
+      stopEmittingMusicPosition()
 
-        musicPositionTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
-            guard let self = self,
-                  let currentItem = self.queuePlayer.currentItem,
-                  currentItem.status == .readyToPlay
-            else { return }
+      musicPositionTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+        guard let self = self,
+              let currentItem = self.queuePlayer.currentItem,
+              currentItem.status == .readyToPlay
+        else { return }
 
-            let position = CMTimeGetSeconds(self.queuePlayer.currentTime())
-            let duration = CMTimeGetSeconds(currentItem.duration)
+        let rawPos  = CMTimeGetSeconds(self.queuePlayer.currentTime())
+        let duration = CMTimeGetSeconds(currentItem.duration)
+        // clamp between 0 and duration:
+        let position = max(0, min(rawPos, duration))
 
-            DispatchQueue.main.async {
-                self.eventSink?([
-                    "type":     "music_position",
-                    "position": position,
-                    "duration": duration
-                ])
-            }
+        DispatchQueue.main.async {
+          self.eventSink?([
+            "type":     "music_position",
+            "position": position,
+            "duration": duration
+          ])
         }
+      }
 
-        RunLoop.main.add(musicPositionTimer!, forMode: .common)
+      RunLoop.main.add(musicPositionTimer!, forMode: .common)
     }
-
 
 
     public func stopEmittingMusicPosition() {
