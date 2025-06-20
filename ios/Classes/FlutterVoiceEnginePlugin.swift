@@ -96,15 +96,6 @@ public class FlutterVoiceEnginePlugin: NSObject, FlutterPlugin, FlutterStreamHan
             result(nil)
         case "stopBackgroundMusic":
             stopBackgroundMusic(result: result)
-        case "playBackgroundMusicPlaylist":
-            guard let args = call.arguments as? [String: Any],
-                  let sources = args["sources"] as? [String],
-                  let loopMode = args["loopMode"] as? String else {
-                result(FlutterError(code: "INVALID_ARGUMENTS", message: "Missing playlist arguments", details: nil))
-                return
-            }
-            audioManager.playBackgroundMusicPlaylist(sources: sources, loopMode: loopMode)
-            result(nil)
         case "setBackgroundMusicVolume":
             guard let args = call.arguments as? [String: Any],
                   let volume = args["volume"] as? Double else {
