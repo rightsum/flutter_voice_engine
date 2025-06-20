@@ -26,7 +26,7 @@ public class AudioManager {
     private var musicFile: AVAudioFile?
     public var musicIsPlaying = false
     private var currentTrackIndex: Int = -1
-    private var loopMode: String = "none" // "none", "track", "playlist"
+    private var loopMode: String = "track" // "none", "track", "playlist"
     private var playlist: [String] = []
     private var playlistLocalPaths: [String] = []
     private var musicFiles: [AVAudioFile?] = []
@@ -35,7 +35,7 @@ public class AudioManager {
     public var eventSink: FlutterEventSink?
     
     private var currentSeekOffset: Double = 0.0
-
+    private var hasSeeked: Bool = false
 
     public init(
         channels: UInt32 = 1,
@@ -52,7 +52,7 @@ public class AudioManager {
     ) {
         self.amplitudeThreshold = amplitudeThreshold
         self.enableAEC = enableAEC
-
+        
         let session = AVAudioSession.sharedInstance()
         do {
             try session.setCategory(category, mode: mode, options: options)
@@ -168,65 +168,28 @@ public class AudioManager {
         
         print("Seeking to position: \(clampedPosition), frame: \(framePosition)")
         
-        // Store the current playing state
         let wasPlaying = musicPlayerNode.isPlaying && musicIsPlaying
-        
-        // Stop the position timer temporarily to avoid conflicts
         stopEmittingMusicPosition()
-        
-        // Stop and reset the player node completely
         musicPlayerNode.stop()
         musicPlayerNode.reset()
-        
-        // Update the seek offset for position calculation
         currentSeekOffset = clampedPosition
+        hasSeeked = true // Mark seek occurred
         
-        // Calculate remaining frames from seek position
         let remainingFrames = musicFile.length - framePosition
         guard remainingFrames > 0 else {
             print("Seek position is at or beyond end of file")
-            // If seeking to end, stop playback
             musicIsPlaying = false
             currentSeekOffset = 0.0
+            hasSeeked = false // Reset seek state
             emitMusicIsPlaying()
+            DispatchQueue.main.async {
+                self.eventSink?(["type": "music_position", "position": 0.0, "duration": duration])
+            }
             return
         }
         
-        // Schedule the segment from the new position
-        musicPlayerNode.scheduleSegment(
-            musicFile,
-            startingFrame: framePosition,
-            frameCount: AVAudioFrameCount(remainingFrames),
-            at: nil,
-            completionHandler: { [weak self] in
-                guard let self = self else { return }
-                
-                // Handle looping after playback completes
-                if self.musicIsPlaying {
-                    if self.loopMode == "track" {
-                        // For single track loop, restart from beginning
-                        self.currentSeekOffset = 0.0
-                        self.seekBackgroundMusic(to: 0.0)
-                        print("Track looped after completion")
-                    } else if self.loopMode == "playlist" {
-                        // For playlist loop, advance to next track
-                        self.currentSeekOffset = 0.0
-                        let nextIndex = (self.currentTrackIndex + 1) % self.playlistUrls.count
-                        self.playTrackAtIndex(nextIndex)
-                        print("Advanced to next track: \(nextIndex)")
-                    } else {
-                        // No loop, stop playing
-                        self.musicIsPlaying = false
-                        self.currentSeekOffset = 0.0
-                        self.stopEmittingMusicPosition()
-                        self.emitMusicIsPlaying()
-                        print("Track ended, no loop")
-                    }
-                }
-            }
-        )
+        scheduleCurrentTrack(startingFrame: framePosition)
         
-        // Ensure audio engine is running
         if !audioEngine.isRunning {
             do {
                 try audioEngine.start()
@@ -238,21 +201,15 @@ public class AudioManager {
             }
         }
         
-        // Resume playback if it was playing before
         if wasPlaying {
             musicPlayerNode.play()
             musicIsPlaying = true
-            // Restart position emission
             startEmittingMusicPosition()
             print("Resumed playback from position: \(clampedPosition)")
         } else {
-            musicIsPlaying = true // Set this to true so position updates work
-            // Still start emitting position for UI updates
             startEmittingMusicPosition()
             print("Music was paused, seek completed but not playing")
         }
-        
-        // Emit the new position immediately
         DispatchQueue.main.async { [weak self] in
             guard let self = self, let sink = self.eventSink else {
                 print("eventSink is nil, cannot send position")
@@ -265,11 +222,9 @@ public class AudioManager {
                 "duration": duration
             ])
         }
-        
-        // Update music state
         emitMusicIsPlaying()
     }
-
+    
     public func startEmittingMusicPosition() {
         stopEmittingMusicPosition()
         print("Starting music position timer")
@@ -439,17 +394,16 @@ public class AudioManager {
         }
         
         let duration = Double(musicFile.length) / musicFile.processingFormat.sampleRate
-        var position: Double = currentSeekOffset // Start with the seek offset
+        var position: Double = currentSeekOffset
         
-        // Add the elapsed time since the last seek/start
         if let nodeTime = musicPlayerNode.lastRenderTime,
            let playerTime = musicPlayerNode.playerTime(forNodeTime: nodeTime),
            playerTime.sampleRate > 0 {
             let elapsedTime = Double(playerTime.sampleTime) / playerTime.sampleRate
             position += elapsedTime
             
-            // Ensure position doesn't exceed duration
-            if position > duration {
+            // Clamp position to duration
+            if position >= duration {
                 position = duration
             }
         }
@@ -491,8 +445,8 @@ public class AudioManager {
             emitMusicIsPlaying()
             print("Background music already paused, updated state")
         }
-        musicFile = nil
     }
+
 
     private func installRecordingTap() {
         let bus = 0
@@ -740,47 +694,20 @@ public class AudioManager {
             eventSink?(["type": "error", "message": "Invalid track index: \(index)"])
             return
         }
-        
         if currentTrackIndex == index && musicIsPlaying {
             print("Track \(index) already playing")
             return
         }
-        
-        // Reset seek offset when playing a new track
-        currentSeekOffset = 0.0
         currentTrackIndex = index
-        
         let localPath = playlistLocalPaths[index]
         guard !localPath.isEmpty, let musicFile = musicFiles[index] else {
             print("Track not preloaded: \(playlistUrls[index])")
             eventSink?(["type": "error", "message": "Track not preloaded: \(playlistUrls[index])"])
             return
         }
-        
         self.musicFile = musicFile
         musicPlayerNode.stop()
-        musicPlayerNode.reset() // Add reset here too
-        
-        musicPlayerNode.scheduleFile(musicFile, at: nil, completionHandler: { [weak self] in
-            guard let self = self, self.musicIsPlaying else { return }
-            if self.loopMode == "track" {
-                self.currentSeekOffset = 0.0 // Reset for loop
-                self.playTrackAtIndex(index)
-                print("Looped track: \(index)")
-            } else if self.loopMode == "playlist" {
-                self.currentSeekOffset = 0.0 // Reset for next track
-                let nextIndex = (index + 1) % self.playlistUrls.count
-                self.playTrackAtIndex(nextIndex)
-                print("Advanced to next track: \(nextIndex)")
-            }
-            
-            DispatchQueue.main.async { [weak self] in
-                guard let self = self, let sink = self.eventSink else { return }
-                let duration = Double(musicFile.length) / musicFile.processingFormat.sampleRate
-                print("Track \(index) ended, emitting position=0")
-                sink(["type": "music_position", "position": 0.0, "duration": duration])
-            }
-        })
+        scheduleCurrentTrack(startingFrame: 0)
         
         if !audioEngine.isRunning {
             do {
@@ -791,17 +718,66 @@ public class AudioManager {
                 eventSink?(["type": "error", "message": "Failed to start audio engine"])
             }
         }
-        
         musicPlayerNode.play()
         musicIsPlaying = true
         startEmittingMusicPosition()
         emitMusicIsPlaying()
-        
         let duration = Double(musicFile.length) / musicFile.processingFormat.sampleRate
         DispatchQueue.main.async { [weak self] in
             self?.eventSink?(["type": "music_position", "position": 0.0, "duration": duration])
         }
-        
         print("Started playing track: \(index), path: \(localPath)")
+    }
+    
+    private func scheduleCurrentTrack(startingFrame: AVAudioFramePosition = 0) {
+        guard let musicFile = musicFile else { return }
+        let sampleRate = musicFile.processingFormat.sampleRate
+        let duration = Double(musicFile.length) / sampleRate
+        let remainingFrames = musicFile.length - startingFrame
+        
+        musicPlayerNode.scheduleSegment(
+            musicFile,
+            startingFrame: startingFrame,
+            frameCount: AVAudioFrameCount(remainingFrames),
+            at: nil,
+            completionHandler: { [weak self] in
+                guard let self = self else { return }
+                if self.musicIsPlaying {
+                    if self.loopMode == "track" {
+                        DispatchQueue.main.async {
+                            // Loop from seeked position if seeked, otherwise from 0
+                            let startPosition = self.hasSeeked ? self.currentSeekOffset : 0.0
+                            let startFrame = AVAudioFramePosition(startPosition * sampleRate)
+                            self.scheduleCurrentTrack(startingFrame: startFrame)
+                            self.musicPlayerNode.play()
+                            print("Looped track from position: \(startPosition)")
+                            self.eventSink?(["type": "music_position", "position": startPosition, "duration": duration])
+                            // Reset seek state only for natural end
+                            if !self.hasSeeked {
+                                self.currentSeekOffset = 0.0
+                            }
+                        }
+                    } else if self.loopMode == "playlist" {
+                        let nextIndex = (self.currentTrackIndex + 1) % self.playlistUrls.count
+                        DispatchQueue.main.async {
+                            self.currentSeekOffset = 0.0
+                            self.hasSeeked = false
+                            self.playTrackAtIndex(nextIndex)
+                            print("Advanced to next track: \(nextIndex)")
+                        }
+                    } else {
+                        self.musicIsPlaying = false
+                        self.currentSeekOffset = 0.0
+                        self.hasSeeked = false
+                        self.stopEmittingMusicPosition()
+                        self.emitMusicIsPlaying()
+                        print("Track ended, no loop")
+                        DispatchQueue.main.async {
+                            self.eventSink?(["type": "music_position", "position": 0.0, "duration": duration])
+                        }
+                    }
+                }
+            }
+        )
     }
 }
