@@ -1,6 +1,8 @@
+import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
-import 'package:flutter_voice_engine_example/session/background_music_sheet.dart';
+import 'package:flutter_voice_engine_example/session/gemini_test/cubit/test_session_cubit.dart';
+import 'package:flutter_voice_engine_example/session/gemini_test/cubit/test_session_state.dart';
 import 'package:flutter_voice_engine_example/session/session_cubit.dart';
 import 'package:flutter_voice_engine_example/session/session_state.dart';
 
@@ -14,13 +16,134 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      home: BlocProvider(
-        create: (context) => SessionCubit(),
-        child: const HomePage(),
+      home: MultiBlocProvider(
+        providers: [
+          BlocProvider<SessionCubit>(
+            create: (context) => SessionCubit(),
+          ),
+          BlocProvider<TestSessionCubit>(
+            create: (context) => TestSessionCubit(),
+          ),
+        ],
+        child: const HomePageOld(),
       ),
     );
   }
 }
+
+class HomePageOld extends StatefulWidget {
+  const HomePageOld({super.key});
+
+  @override
+  State<HomePageOld> createState() => _HomePageOldState();
+}
+
+class _HomePageOldState extends State<HomePageOld>   {
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Gemini Live Bot (Multimodal)')),
+      body: BlocConsumer<TestSessionCubit, TestSessionState>(
+        listener: (context, state) {
+          if (state.isError && state.error != null) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text(state.error!)),
+            );
+          }
+        },
+        builder: (context, state) {
+          final cubit = context.read<TestSessionCubit>();
+          final cameraController = cubit.cameraController; // Get the controller from the cubit
+          return Column(
+            children: [
+              Expanded(
+                child: Stack(
+                  children: [
+                    // Camera Preview
+                    if (state.showCameraPreview && cameraController != null && cameraController.value.isInitialized)
+                      Center(
+                        child: AspectRatio(
+                          aspectRatio: cameraController.value.aspectRatio,
+                          child: CameraPreview(cameraController),
+                        ),
+                      )
+                    else if (state.isInitializingCamera)
+                      const Center(child: CircularProgressIndicator())
+                    else if (!state.isSessionStarted)
+                        const Center(child: Text("Tap 'Start Session' to begin."))
+                      else
+                        const Center(child: Text("Camera not active. Session started."))
+                    ,
+
+                    // Overlay for status messages and controls
+                    Positioned.fill(
+                      child: Align(
+                        alignment: Alignment.bottomCenter,
+                        child: Padding(
+                          padding: const EdgeInsets.all(16.0),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              // Status Messages
+                              if (state.isInitializingCamera)
+                                const Text("Initializing Camera...")
+                              else if (state.isStreamingImages && state.isRecording)
+                                const Text("Observing & Listening...")
+                              else if (state.promptUserToSpeak)
+                                  const Text("Now, ask your question about what you see!")
+                                else if (state.isBotSpeaking)
+                                    const Text("Bot is speaking...")
+                                  else if (state.isRecording)
+                                      const Text("Listening...")
+                                    else if (state.isSessionStarted && !state.isCameraActive)
+                                        const Text("Session active. Open camera to observe.")
+                                      else if (state.isSessionStarted)
+                                          const Text("Session active.") // Generic if no specific state
+                              ,
+
+                              const SizedBox(height: 20),
+
+                              // Control Buttons
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                                children: [
+                                  // Start/Stop Session
+                                  ElevatedButton(
+                                    onPressed: state.isSessionStarted
+                                        ? cubit.stopSession
+                                        : cubit.startSession,
+                                    child: Text(state.isSessionStarted ? 'End Session' : 'Start Session'),
+                                  ),
+
+                                  // Manual Start/Stop Recording - kept as per request
+                                  // but will largely be managed automatically by startSession/stopSession
+                                  ElevatedButton(
+                                    onPressed: state.isSessionStarted && !state.isRecording
+                                        ? () => cubit.startRecording()
+                                        : state.isRecording
+                                        ? () => cubit.stopRecording()
+                                        : null,
+                                    child: Text(state.isRecording ? 'Stop Voice' : 'Start Voice'),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -32,18 +155,10 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
 
   @override
-  void initState() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      context.read<SessionCubit>().setMusicPlaylist(musicPlaylist);
-    });
-    super.initState();
-  }
-
-  @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Voice Engine Test')),
-      body: BlocBuilder<SessionCubit, SessionState>(
+      body: BlocBuilder<TestSessionCubit, TestSessionState>(
         builder: (context, state) {
           return Center(
             child: Column(
@@ -59,43 +174,81 @@ class _HomePageState extends State<HomePage> {
                   ),
                 const SizedBox(height: 20),
                 ElevatedButton(
-                  onPressed: state.isSessionStarted ? null : () => context.read<SessionCubit>().startSession(),
+                  onPressed: state.isSessionStarted ? null : () => context.read<TestSessionCubit>().startSession(),
                   child: const Text('Start Session'),
                 ),
                 ElevatedButton(
-                  onPressed: state.isSessionStarted ? () => context.read<SessionCubit>().stopSession() : null,
+                  onPressed: state.isSessionStarted ? () => context.read<TestSessionCubit>().stopSession() : null,
                   child: const Text('Stop Session'),
                 ),
                 ElevatedButton(
-                  onPressed: state.isSessionStarted && !state.isRecording ? () => context.read<SessionCubit>().startRecording() : null,
+                  onPressed: state.isSessionStarted && !state.isRecording ? () => context.read<TestSessionCubit>().startRecording() : null,
                   child: const Text('Start Recording'),
                 ),
                 ElevatedButton(
-                  onPressed: state.isRecording ? () => context.read<SessionCubit>().stopRecording() : null,
+                  onPressed: state.isRecording ? () => context.read<TestSessionCubit>().stopRecording() : null,
                   child: const Text('Stop Recording'),
-                ),
-                const MusicPlayerCard(),
-                if (state.isMusicLoading) const CircularProgressIndicator(),
-                ElevatedButton(
-                  onPressed: () {
-                    showAdaptiveDialog(
-                      context: context,
-                      barrierDismissible: true,
-                      builder: (dialogContext) => MultiBlocProvider(
-                        providers: [
-                          BlocProvider.value(value: context.read<SessionCubit>()),
-                        ],
-                        child: const BackgroundMusicBottomSheet(),
-                      ),
-                    );
-                  },
-                  child: const Text('Open Dialog'),
                 ),
               ],
             ),
           );
         },
       ),
+    );
+  }
+}
+
+class TestCameraHomePage extends StatefulWidget {
+  const TestCameraHomePage({super.key});
+
+  @override
+  State<TestCameraHomePage> createState() => _TestCameraHomePageState();
+}
+
+class _TestCameraHomePageState extends State<TestCameraHomePage> {
+  CameraController? _cameraController;
+  bool _isCameraInitialized = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _initializeCamera();
+  }
+
+  Future<void> _initializeCamera() async {
+    try {
+      final cameras = await availableCameras();
+      if (cameras.isNotEmpty) {
+        _cameraController = CameraController(
+          cameras.first,
+          ResolutionPreset.medium,
+        );
+        await _cameraController!.initialize();
+        setState(() {
+          _isCameraInitialized = true;
+        });
+      } else {
+        print('No cameras available');
+      }
+    } catch (e) {
+      print('Error initializing camera: $e');
+    }
+  }
+
+  @override
+  void dispose() {
+    _cameraController?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    print("Building TestCameraHomePage, isCameraInitialized: $_isCameraInitialized, cameraController: $_cameraController");
+    return Scaffold(
+      appBar: AppBar(title: const Text('Camera Preview')),
+      body: _isCameraInitialized && _cameraController != null
+          ? CameraPreview(_cameraController!)
+          : const Center(child: CircularProgressIndicator()),
     );
   }
 }
