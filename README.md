@@ -1,17 +1,18 @@
 # FlutterVoiceEngine 🎙️
 
-A powerful Flutter plugin for real-time audio processing, designed for voice bots and conversational AI. Capture crystal-clear audio, play responses, and eliminate echo with hardware-based acoustic echo cancellation (AEC) on iOS. Perfect for building seamless voice-driven experiences!
+A powerful native audio plugin for Flutter **currently iOS only** to build real-time conversational voice bots, background music playback, and advanced audio session management. Perfect for building seamless voice-driven experiences!
 
 > **Note**: Currently supports iOS only. Android support is in development.
 
 ## Features
 
-- 🎵 **Real-Time Audio**: Record and stream audio chunks as Base64-encoded data.
-- 🔇 **Echo Cancellation**: Hardware-based AEC for clear voice interactions.
+- 🎵 **Real-Time Audio**: Record and stream audio chunks as raw PCM Int16 data.
+- 🔇 **Echo Cancellation**: Hardware-based Acoustic Echo Cancellation (AEC) with Apple’s Voice Processing.
+- 🎵 **Background Music:** Play, seek, pause, loop, and manage playlists with live position and state updates.
+- 🔗 **Flutter Streams:** Audio chunks, music position, playback state, and errors via Dart Streams.
 - 🎚️ **Configurable Audio**: Customize `sampleRate`, `channels`, `bitDepth`, `bufferSize`, and more.
 - 🚨 **Error Handling**: Stream errors to handle issues gracefully.
-- 📴 **Interruption Support**: Respond to audio interruptions (e.g., incoming calls).
-- 🛠️ **Extensible**: Ready for custom audio processors (coming soon).
+- 🛠️ **Extensible**: Fine-grained AVAudioSession control and WebSocket integration for bots.
 
 ## Getting Started
 
@@ -72,10 +73,19 @@ void main() async {
 
   // Initialize with custom config
   voiceEngine.audioConfig = AudioConfig(
-    sampleRate: 48000,
+    sampleRate: 24000,
     channels: 1,
     bitDepth: 16,
+    bufferSize: 4096,
+    amplitudeThreshold: 0.05,
     enableAEC: true,
+  );
+
+  voiceEngine.sessionConfig = AudioSessionConfig(
+    category: AudioCategory.playAndRecord,
+    mode: AudioMode.spokenAudio,
+    options: {AudioOption.defaultToSpeaker},
+    preferredBufferDuration: 0.005,
   );
 
   try {
@@ -83,8 +93,9 @@ void main() async {
     await voiceEngine.initialize();
 
     // Listen for audio chunks
-    voiceEngine.audioChunkStream.listen((chunk) {
-      print('Audio chunk: ${chunk.substring(0, 20)}...');
+    voiceEngine.audioChunkStream.listen((audioBytes) {
+      print('Audio chunk: ${audioBytes.sublist(0, 20)}...');
+      // Send Uint8List (raw PCM Int16, 24kHz) to backend via WebSocket
     });
 
     // Listen for errors
@@ -92,24 +103,43 @@ void main() async {
       print('Error: $error');
     });
 
-    // Handle interruptions
-    voiceEngine.onInterruption = () {
-      print('Audio interrupted');
-    };
+    // Listen for background music updates
+    voiceEngine.backgroundMusicPositionStream.listen((pos) {
+      print('Music position: $pos');
+    });
+
+    voiceEngine.backgroundMusicDurationStream.listen((dur) {
+      print('Music duration: $dur');
+    });
+
+    voiceEngine.backgroundMusicIsPlayingStream.listen((isPlaying) {
+      print('Is music playing? $isPlaying');
+    });
 
     // Start recording
     await voiceEngine.startRecording();
 
-    // Stop after 5 seconds
-    await Future.delayed(Duration(seconds: 5));
+    // Stop recording
     await voiceEngine.stopRecording();
 
-    // Play a sample audio chunk (replace with valid Base64 audio)
-    await voiceEngine.playAudioChunk("AAAA");
+    // Play a sample audio chunk (replace with valid PCM Int16 24kHz)
+    await voiceEngine.playAudioChunk(responseBytes);
+
+    // Play background music
+    await voiceEngine.playBackgroundMusic('/path/to/track.mp3', loop: true);
+
+    // Set volume
+    await voiceEngine.setBackgroundMusicVolume(0.3);
+
+    // Seek to position
+    await voiceEngine.seekBackgroundMusic(Duration(seconds: 60));
+
+    // Stop playback and music
     await voiceEngine.stopPlayback();
+    await voiceEngine.stopBackgroundMusic();
 
     // Cleanup
-    await voiceEngine.shutdown();
+    await voiceEngine.shutdownAll();
   } catch (e) {
     print('Error: $e');
   }
@@ -126,20 +156,29 @@ Check the `example/` directory for a complete demo app.
 - `stopRecording`: Stop recording.
 - `playAudioChunk`: Play a Base64-encoded audio chunk.
 - `stopPlayback`: Stop playback.
-- `shutdown`: Release resources.
+- `playBackgroundMusic`: Play a single track with optional looping.
+- `setMusicPlaylist`: Set a playlist of local or remote tracks.
+- `playTrackAtIndex`: Play a specific track from the playlist.
+- `stopBackgroundMusic`: Seek to a specific position in the track.
+- `setBackgroundMusicVolume`: Adjust music volume (0.0 to 1.0).
+- `getBackgroundMusicVolume`: Get current music volume.
+- `shutdownBot`: Stop voice bot activity (music continues).
+- `shutdownAll`: Stop all activities and release resources.
 
 ### Streams
-- `audioChunkStream`: Emits Base64-encoded audio chunks.
+- `audioChunkStream`: Emits raw PCM Int16 audio chunks (Uint8List).
 - `errorStream`: Emits error messages.
-
-### Callbacks
-- `onInterruption`: Triggered on audio interruptions.
+- `backgroundMusicPositionStream`: Emits current music position.
+- `backgroundMusicDurationStream`: Emits music duration.
+- `backgroundMusicIsPlayingStream`: Emits playback state (true/false).
 
 ## Limitations
 
-- iOS-only for now (Android support planned).
-- `AudioProcessor` support not yet implemented.
+- iOS-only for now (AVFoundation-based).
+- Android support planned.
+- All PCM data is signed Int16, little-endian, 24kHz by default, interleaved (mono by default).
 - Playback requires valid Base64-encoded audio chunks.
+- For best voice bot results, use 1 channel (mono), 24000Hz, 16-bit.
 
 ## Contributing
 
