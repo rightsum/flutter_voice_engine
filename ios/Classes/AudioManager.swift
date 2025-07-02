@@ -28,22 +28,8 @@ public class AudioManager {
     private var playlistItems: [AVPlayerItem] = []
     private var musicPositionTimer: Timer?
     public var musicIsPlaying = false
-    
-    
-//    private let musicPlayerNode = AVAudioPlayerNode()
-//    private var musicFile: AVAudioFile?
-//    public var musicIsPlaying = false
-//    private var currentTrackIndex: Int = -1
-//    private var loopMode: String = "track" // "none", "track", "playlist"
-//    private var playlist: [String] = []
-//    private var playlistLocalPaths: [String] = []
-//    private var musicFiles: [AVAudioFile?] = []
-//    private var playlistUrls: [String] = []
-//    private var musicPositionTimer: Timer?
-    
+
     public var eventSink: FlutterEventSink?
-    
-//    private var currentSeekOffset: Double = 0.0
 
     public init(
         channels: UInt32 = 1,
