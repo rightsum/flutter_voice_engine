@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:typed_data';
 import 'package:flutter/services.dart';
-import '../platform/flutter_voice_engine_platform_interface.dart';
 import 'audio_config.dart';
 import 'audio_session_config.dart';
 

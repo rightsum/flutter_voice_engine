@@ -105,7 +105,9 @@ class FlutterVoiceEnginePlugin : FlutterPlugin, MethodChannel.MethodCallHandler,
   }
 
   override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
-    audioManager.shutdown()
+    if (this::audioManager.isInitialized) {
+      audioManager.shutdown()
+    }
     scope.cancel()
   }
 }
