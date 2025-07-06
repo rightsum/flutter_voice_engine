@@ -5,16 +5,17 @@ import Combine
 public class FlutterVoiceEnginePlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
     public static func register(with registrar: FlutterPluginRegistrar) {
         let channel = FlutterMethodChannel(name: "flutter_voice_engine", binaryMessenger: registrar.messenger())
-        let audioChunkChannel = FlutterEventChannel(name: "flutter_voice_engine/audio_chunk", binaryMessenger: registrar.messenger())
+        let eventChannel = FlutterEventChannel(name: "flutter_voice_engine/events", binaryMessenger: registrar.messenger())
         let instance = FlutterVoiceEnginePlugin()
         registrar.addMethodCallDelegate(instance, channel: channel)
-        audioChunkChannel.setStreamHandler(instance)
+        eventChannel.setStreamHandler(instance)
     }
-    
+
     private var audioManager: AudioManager
-    private var audioChunkSink: FlutterEventSink?
+    private var eventSink: FlutterEventSink?
     private var cancellables = Set<AnyCancellable>()
     private var interruptionHandler: (() -> Void)?
+    private var isInitialized: Bool = false
 
     override init() {
         audioManager = AudioManager()
@@ -50,6 +51,9 @@ public class FlutterVoiceEnginePlugin: NSObject, FlutterPlugin, FlutterStreamHan
         if type == .began {
             audioManager.stopPlayback()
             interruptionHandler?()
+            DispatchQueue.main.async { [weak self] in
+                self?.eventSink?(["type": "error", "message": "Audio session interrupted"])
+            }
         }
     }
 
@@ -81,14 +85,73 @@ public class FlutterVoiceEnginePlugin: NSObject, FlutterPlugin, FlutterStreamHan
             playAudioChunk(audioData: audioData, result: result)
         case "stopPlayback":
             stopPlayback(result: result)
-        case "shutdown":
-            shutdown(result: result)
+        case "playBackgroundMusic":
+            guard let args = call.arguments as? [String: Any],
+                  let source = args["source"] as? String else {
+                result(FlutterError(code: "INVALID_ARGUMENTS", message: "Missing music file source", details: nil))
+                return
+            }
+            let loop = (args["loop"] as? Bool) ?? true
+            audioManager.playBackgroundMusic(source: source, loop: loop)
+            result(nil)
+        case "stopBackgroundMusic":
+            stopBackgroundMusic(result: result)
+        case "setBackgroundMusicVolume":
+            guard let args = call.arguments as? [String: Any],
+                  let volume = args["volume"] as? Double else {
+                result(FlutterError(code: "INVALID_ARGUMENTS", message: "Missing volume", details: nil))
+                return
+            }
+            audioManager.setBackgroundMusicVolume(Float(volume))
+            result(nil)
+        case "getBackgroundMusicVolume":
+            let volume = audioManager.getBackgroundMusicVolume()
+            result(Double(volume))
+        case "seekBackgroundMusic":
+            guard let args = call.arguments as? [String: Any],
+                  let position = args["position"] as? Double else {
+                result(FlutterError(code: "INVALID_ARGUMENTS", message: "Missing position", details: nil))
+                return
+            }
+            audioManager.seekBackgroundMusic(to: position)
+            result(nil)
+        case "playTrackAtIndex":
+            guard let args = call.arguments as? [String: Any],
+                  let index = args["index"] as? Int else {
+                result(FlutterError(code: "INVALID_ARG", message: "Invalid index", details: nil))
+                return
+            }
+            audioManager.playTrackAtIndex(index)
+            result(nil)
+        case "setMusicPlaylist":
+            guard let args = call.arguments as? [String: Any],
+                  let urls = args["urls"] as? [String] else {
+                result(FlutterError(code: "INVALID_ARG", message: "Invalid playlist URLs", details: nil))
+                return
+            }
+            audioManager.setMusicPlaylist(urls)
+            result(nil)
+        case "shutdownBot":
+            shutdownBot(result: result)
+        case "shutdownAll":
+            shutdownAll(result: result)
         default:
             result(FlutterMethodNotImplemented)
         }
     }
 
+    private func stopBackgroundMusic(result: @escaping FlutterResult) {
+        audioManager.stopBackgroundMusic()
+        result(nil)
+    }
+
     private func initialize(audioConfig: [String: Any], sessionConfig: [String: Any], processors: [[String: Any]], result: @escaping FlutterResult) {
+        if isInitialized {
+            print("AudioManager already initialized. Skipping re-init.")
+            result(nil)
+            return
+        }
+
         let channels = audioConfig["channels"] as? UInt32 ?? 1
         let sampleRate = audioConfig["sampleRate"] as? Double ?? 48000.0
         let bitDepth = audioConfig["bitDepth"] as? Int ?? 16
@@ -113,8 +176,9 @@ public class FlutterVoiceEnginePlugin: NSObject, FlutterPlugin, FlutterStreamHan
             preferredSampleRate: sampleRate,
             preferredBufferDuration: preferredBufferDuration
         )
-
+        audioManager.eventSink = eventSink
         audioManager.setupEngine()
+        isInitialized = true
         print("Plugin: Initialization complete")
         result(nil)
     }
@@ -122,8 +186,11 @@ public class FlutterVoiceEnginePlugin: NSObject, FlutterPlugin, FlutterStreamHan
     private func startRecording(result: @escaping FlutterResult) {
         audioManager.startRecording().sink { [weak self] audioData in
             DispatchQueue.main.async {
-                print("Plugin: Sending audio chunk to Flutter, size: \(audioData.count) bytes")
-                self?.audioChunkSink?(FlutterStandardTypedData(bytes: audioData))
+                guard let sink = self?.eventSink else {
+                    print("Plugin: eventSink is nil, cannot send audio chunk")
+                    return
+                }
+                sink(["type": "audio_chunk", "data": FlutterStandardTypedData(bytes: audioData)])
             }
         }.store(in: &cancellables)
         result(nil)
@@ -141,6 +208,9 @@ public class FlutterVoiceEnginePlugin: NSObject, FlutterPlugin, FlutterStreamHan
             result(nil)
         } catch {
             result(FlutterError(code: "PLAYBACK_FAILED", message: error.localizedDescription, details: nil))
+            DispatchQueue.main.async { [weak self] in
+                self?.eventSink?(["type": "error", "message": "Playback failed: \(error.localizedDescription)"])
+            }
         }
     }
 
@@ -149,22 +219,48 @@ public class FlutterVoiceEnginePlugin: NSObject, FlutterPlugin, FlutterStreamHan
         result(nil)
     }
 
-    private func shutdown(result: @escaping FlutterResult) {
-        audioManager.shutdown()
+    private func shutdownBot(result: @escaping FlutterResult) {
+        audioManager.shutdownBot()
+        cancellables.removeAll()
+        result(nil)
+    }
+
+    private func shutdownAll(result: @escaping FlutterResult) {
+        audioManager.shutdownAll()
         cancellables.removeAll()
         NotificationCenter.default.removeObserver(self)
+        eventSink = nil
         result(nil)
     }
 
     public func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
-        print("Plugin: Setting up audio chunk stream")
-        audioChunkSink = events
+        print("Plugin: Setting up event stream")
+        eventSink = events
+        audioManager.eventSink = events
+        audioManager.startRecording().sink { [weak self] audioData in
+            DispatchQueue.main.async {
+                guard let sink = self?.eventSink else {
+                    print("Plugin: eventSink is nil, cannot send audio chunk")
+                    return
+                }
+                sink(["type": "audio_chunk", "data": FlutterStandardTypedData(bytes: audioData)])
+            }
+        }.store(in: &cancellables)
+        audioManager.startEmittingMusicPosition()
+        DispatchQueue.main.async {
+            print("Plugin: Sending initial music state: \(self.audioManager.musicIsPlaying)")
+            events(["type": "music_state", "state": self.audioManager.musicIsPlaying])
+        }
         return nil
     }
 
     public func onCancel(withArguments arguments: Any?) -> FlutterError? {
-        print("Plugin: Cancelling audio chunk stream")
-        audioChunkSink = nil
+        print("Plugin: Cancelling event stream")
+        eventSink = nil
+        audioManager.eventSink = nil
+        audioManager.stopRecording()
+        audioManager.stopEmittingMusicPosition()
+        cancellables.removeAll()
         return nil
     }
 

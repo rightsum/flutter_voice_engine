@@ -15,39 +15,29 @@ abstract class FlutterVoiceEnginePlatform extends PlatformInterface {
     _instance = instance;
   }
 
+  Stream<Duration> get backgroundMusicPositionStream;
+  Stream<Duration> get backgroundMusicDurationStream;
+  Stream<bool> get backgroundMusicIsPlayingStream;
+  Stream<Uint8List> get audioChunkStream;
+  Stream<String> get errorStream;
+
   Future<void> initialize(
       AudioConfig config,
       AudioSessionConfig sessionConfig,
       List<AudioProcessor> processors,
-      ) {
-    throw UnimplementedError('initialize() has not been implemented.');
-  }
+      );
 
-  Future<void> startRecording() {
-    throw UnimplementedError('startRecording() has not been implemented.');
-  }
+  Future<void> startRecording();
 
-  Future<void> stopRecording() {
-    throw UnimplementedError('stopRecording() has not been implemented.');
-  }
+  Future<void> stopRecording();
 
-  Future<void> playAudioChunk(String base64String) {
-    throw UnimplementedError('playAudioChunk() has not been implemented.');
-  }
+  Future<void> playAudioChunk(String base64String);
 
-  Future<void> stopPlayback() {
-    throw UnimplementedError('stopPlayback() has not been implemented.');
-  }
+  Future<void> stopPlayback();
 
-  Future<void> shutdown() {
-    throw UnimplementedError('shutdown() has not been implemented.');
-  }
+  Future<void> shutdown();
 
-  Future<void> setAudioChunkHandler(void Function(Uint8List) handler) {
-    throw UnimplementedError('setAudioChunkHandler() has not been implemented.');
-  }
+  Future<void> setAudioChunkHandler(void Function(Uint8List) handler);
 
-  Future<void> setInterruptionHandler(void Function() handler) {
-    throw UnimplementedError('setInterruptionHandler() has not been implemented.');
-  }
+  Future<void> setInterruptionHandler(void Function() handler);
 }

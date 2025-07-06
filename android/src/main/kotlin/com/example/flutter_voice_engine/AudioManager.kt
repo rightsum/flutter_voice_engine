@@ -2,11 +2,15 @@ package com.example.flutter_voice_engine
 
 import android.content.Context
 import android.media.*
-import android.util.Base64
-import java.nio.ByteBuffer
-import java.util.concurrent.atomic.AtomicBoolean
+import android.util.Log
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
+import java.util.concurrent.atomic.AtomicBoolean
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.AutomaticGainControl
+import android.media.audiofx.NoiseSuppressor
+import android.media.AudioManager as AndroidAudioManager
+
 
 class AudioManager(
     private val context: Context,
@@ -19,64 +23,80 @@ class AudioManager(
 ) {
     private var audioRecord: AudioRecord? = null
     private var audioTrack: AudioTrack? = null
+    private var aec: AcousticEchoCanceler? = null
+    private var ns: NoiseSuppressor? = null
+
     private var isRecording = AtomicBoolean(false)
-    private val audioChunkChannel = Channel<String>(Channel.UNLIMITED)
+    private val audioChunkChannel = Channel<ByteArray>(Channel.UNLIMITED)
     private val errorChannel = Channel<String>(Channel.UNLIMITED)
     private var recordingJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO)
 
-    fun setupAudioSession(
-        usage: Int,
-        contentType: Int,
-        flags: Int
-    ) {
-        val audioAttributes = AudioAttributes.Builder()
-            .setUsage(usage)
-            .setContentType(contentType)
-            .setFlags(flags)
-            .build()
-        val audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
-            .setAudioAttributes(audioAttributes)
-            .build()
-        val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        audioManager.requestAudioFocus(audioFocusRequest)
-    }
-
     fun setupEngine() {
         val channelConfig = if (channels == 1) AudioFormat.CHANNEL_IN_MONO else AudioFormat.CHANNEL_IN_STEREO
-        val audioFormat = if (bitDepth == 16) AudioFormat.ENCODING_PCM_16BIT else AudioFormat.ENCODING_PCM_FLOAT
+        val audioFormat = AudioFormat.ENCODING_PCM_16BIT
         val minBufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat)
 
         audioRecord = AudioRecord(
-            MediaRecorder.AudioSource.MIC,
+            MediaRecorder.AudioSource.VOICE_COMMUNICATION,
             sampleRate,
             channelConfig,
             audioFormat,
             bufferSize.coerceAtLeast(minBufferSize)
         )
 
+        if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
+            errorChannel.trySend("AudioRecord initialization failed")
+            return
+        }
+
+        if (enableAEC && AcousticEchoCanceler.isAvailable()) {
+            aec = AcousticEchoCanceler.create(audioRecord!!.audioSessionId)
+            aec?.enabled = true
+        }
+
+        if (NoiseSuppressor.isAvailable()) {
+            ns = NoiseSuppressor.create(audioRecord!!.audioSessionId)
+            ns?.enabled = true
+        }
+
+        if (AutomaticGainControl.isAvailable()) {
+            val agc = AutomaticGainControl.create(audioRecord!!.audioSessionId)
+            agc.enabled = true
+        }
+
+        val playbackSampleRate = 24000
+
         val trackChannelConfig = if (channels == 1) AudioFormat.CHANNEL_OUT_MONO else AudioFormat.CHANNEL_OUT_STEREO
         audioTrack = AudioTrack(
             AudioAttributes.Builder()
                 .setUsage(AudioAttributes.USAGE_MEDIA)
-                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
                 .build(),
             AudioFormat.Builder()
-                .setSampleRate(sampleRate)
+                .setSampleRate(playbackSampleRate)
                 .setChannelMask(trackChannelConfig)
                 .setEncoding(audioFormat)
                 .build(),
-            Math.max(bufferSize, minBufferSize),
+            bufferSize.coerceAtLeast(minBufferSize),
             AudioTrack.MODE_STREAM,
-            AudioManager.AUDIO_SESSION_ID_GENERATE
+            AndroidAudioManager.AUDIO_SESSION_ID_GENERATE
         )
 
-        if (enableAEC && AcousticEchoCanceler.isAvailable()) {
-            AcousticEchoCanceler.create(audioRecord?.audioSessionId)?.apply { enabled = true }
+        if (audioTrack?.state != AudioTrack.STATE_INITIALIZED) {
+            errorChannel.trySend("AudioTrack initialization failed")
+            return
         }
+
+        audioTrack?.setVolume(1.0f)
     }
 
-    fun startRecording(): Channel<String> {
+    fun startRecording(): Channel<ByteArray> {
+        if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
+            errorChannel.trySend("Cannot start recording, AudioRecord not initialized")
+            return audioChunkChannel
+        }
+
         if (isRecording.getAndSet(true)) return audioChunkChannel
         audioRecord?.startRecording()
         recordingJob = scope.launch {
@@ -85,12 +105,8 @@ class AudioManager(
                 while (isRecording.get()) {
                     val read = audioRecord?.read(buffer, 0, buffer.size) ?: 0
                     if (read > 0) {
-                        val amplitude = calculateAmplitude(buffer, read)
-                        if (audioTrack?.playState == AudioTrack.PLAYSTATE_PLAYING && amplitude < amplitudeThreshold) {
-                            continue
-                        }
-                        val base64String = Base64.encodeToString(buffer, 0, read, Base64.NO_WRAP)
-                        audioChunkChannel.send(base64String)
+                        val audioData = buffer.copyOf(read)
+                        audioChunkChannel.send(audioData)
                     } else if (read < 0) {
                         errorChannel.send("Recording error: $read")
                     }
@@ -106,19 +122,17 @@ class AudioManager(
         if (isRecording.getAndSet(false)) {
             recordingJob?.cancel()
             audioRecord?.stop()
-            audioChunkChannel.close()
         }
     }
 
-    fun playAudioChunk(base64String: String) {
+    fun playAudioChunk(audioData: ByteArray) {
         try {
-            val data = Base64.decode(base64String, Base64.NO_WRAP)
-            audioTrack?.write(data, 0, data.size)
+            audioTrack?.write(audioData, 0, audioData.size)
             if (audioTrack?.playState != AudioTrack.PLAYSTATE_PLAYING) {
                 audioTrack?.play()
             }
         } catch (e: Exception) {
-            errorChannel.send("Playback failed: ${e.message}")
+            errorChannel.trySend("Playback failed: ${e.message}")
         }
     }
 
@@ -130,17 +144,13 @@ class AudioManager(
     fun shutdown() {
         stopRecording()
         stopPlayback()
+        aec?.release()
+        ns?.release()
         audioRecord?.release()
         audioTrack?.release()
         audioRecord = null
         audioTrack = null
         scope.cancel()
-    }
-
-    private fun calculateAmplitude(buffer: ByteArray, read: Int): Float {
-        val shorts = ShortArray(read / 2)
-        ByteBuffer.wrap(buffer).asShortBuffer().get(shorts)
-        return shorts.maxOfOrNull { Math.abs(it.toFloat()) } ?: 0f
     }
 
     fun getErrorChannel(): Channel<String> = errorChannel
