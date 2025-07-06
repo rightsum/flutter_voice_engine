@@ -1,8 +1,6 @@
 # FlutterVoiceEngine 🎙️
 
-A powerful native audio plugin for Flutter **currently iOS only** to build real-time conversational voice bots, background music playback, and advanced audio session management. Perfect for building seamless voice-driven experiences!
-
-> **Note**: Currently supports iOS only. Android support is in development.
+A powerful native audio plugin for Android & iOS to build real-time conversational voice bots, background music playback, and advanced audio session management.
 
 ## Features
 
@@ -36,6 +34,12 @@ Run:
 
 ```bash
 flutter pub get
+```
+
+### Android Setup
+
+```xml
+<uses-permission android:name="android.permission.RECORD_AUDIO"/>
 ```
 
 ### iOS Setup
@@ -174,11 +178,7 @@ Check the `example/` directory for a complete demo app.
 
 ## Limitations
 
-- iOS-only for now (AVFoundation-based).
-- Android support planned.
-- All PCM data is signed Int16, little-endian, 24kHz by default, interleaved (mono by default).
-- Playback requires valid Base64-encoded audio chunks.
-- For best voice bot results, use 1 channel (mono), 24000Hz, 16-bit.
+- Background music feature on Android is coming soon!
 
 ## Contributing
 
