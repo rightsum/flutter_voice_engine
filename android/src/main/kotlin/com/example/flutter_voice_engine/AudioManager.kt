@@ -65,7 +65,6 @@ class AudioManager(
             agc.enabled = true
         }
 
-        // 👇 FIX: Use 24000Hz for playback to match Gemini's typical output (Leda voice is often ~24kHz)
         val playbackSampleRate = 24000
 
         val trackChannelConfig = if (channels == 1) AudioFormat.CHANNEL_OUT_MONO else AudioFormat.CHANNEL_OUT_STEREO
