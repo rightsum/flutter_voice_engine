@@ -223,6 +223,7 @@ public class AudioManager {
 
     private func installRecordingTap() {
         let bus = 0
+        inputNode.removeTap(onBus: bus)
         inputNode.installTap(onBus: bus, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
             guard let self = self, let converter = self.recordingConverter else {
                 self?.errorPublisher.send("Recording converter unavailable")
