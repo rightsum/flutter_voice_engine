@@ -150,7 +150,7 @@ void main() async {
 }
 ```
 
-Check the `example/` directory for a complete demo app.
+Check the real world usage in [Project Astra Clone](https://github.com/AdnanKhan45/project-astra-flutter) app in Flutter.
 
 ## API Overview
 
