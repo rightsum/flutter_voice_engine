@@ -1,78 +1,35 @@
 import 'dart:async';
 import 'dart:typed_data';
-import 'package:flutter/services.dart';
 import 'audio_config.dart';
 import 'audio_session_config.dart';
+import 'audio_processor.dart';
+import '../platform/flutter_voice_engine_platform_interface.dart';
 
 class FlutterVoiceEngine {
-  static const MethodChannel _channel =
-  MethodChannel('flutter_voice_engine');
-  static const EventChannel _eventChannel =
-  EventChannel('flutter_voice_engine/events');
-
   AudioConfig audioConfig = AudioConfig();
   AudioSessionConfig sessionConfig = AudioSessionConfig();
   bool isInitialized = false;
   bool isRecording = false;
 
-  final _audioChunkController = StreamController<Uint8List>.broadcast();
-  final _musicPositionController =
-  StreamController<Map<String, double>>.broadcast();
-  final _musicStateController = StreamController<bool>.broadcast();
-  final _errorController = StreamController<String>.broadcast();
+  final _platform = FlutterVoiceEnginePlatform.instance;
 
   FlutterVoiceEngine() {
-    _eventChannel.receiveBroadcastStream().listen(
-          (dynamic event) {
-        if (event is Map) {
-          final type = event['type'] as String?;
-          switch (type) {
-            case 'audio_chunk':
-              final data = event['data'];
-              if (data is Uint8List) {
-                _audioChunkController.add(data);
-              } else {
-                _errorController
-                    .add('Invalid audio chunk data type: ${data.runtimeType}');
-              }
-              break;
-            case 'music_position':
-              final pos = event['position'] as double?;
-              final dur = event['duration'] as double?;
-              if (pos != null && dur != null) {
-                _musicPositionController.add({
-                  'position': pos,
-                  'duration': dur,
-                });
-              } else {
-                _errorController.add('Invalid music position data: $event');
-              }
-              break;
-            case 'music_state':
-              final playing = event['state'] as bool?;
-              if (playing != null) {
-                _musicStateController.add(playing);
-              } else {
-                _errorController
-                    .add('Invalid music state data: ${event['state']}');
-              }
-              break;
-            case 'error':
-              final msg = event['message'] as String?;
-              if (msg != null) _errorController.add(msg);
-              break;
-            default:
-              _errorController.add('Unknown event type: $type');
-          }
-        } else {
-          _errorController
-              .add('Invalid event data type: ${event.runtimeType}');
-        }
-      },
-      onError: (e) => _errorController.add('Event stream error: $e'),
-      onDone: () => _errorController.add('Event stream closed'),
-    );
+    // Set up stream listeners from platform
+    _platform.audioChunkStream.listen(_audioChunkController.add);
+    _platform.backgroundMusicPositionStream.listen((duration) {
+      _musicPositionController.add({
+        'position': duration.inMilliseconds / 1000.0,
+        'duration': duration.inMilliseconds / 1000.0, // Simplified for now
+      });
+    });
+    _platform.backgroundMusicIsPlayingStream.listen(_musicStateController.add);
+    _platform.errorStream.listen(_errorController.add);
   }
+
+  final _audioChunkController = StreamController<Uint8List>.broadcast();
+  final _musicPositionController = StreamController<Map<String, double>>.broadcast();
+  final _musicStateController = StreamController<bool>.broadcast();
+  final _errorController = StreamController<String>.broadcast();
 
   /// Streams
   Stream<Uint8List> get audioChunkStream => _audioChunkController.stream;
@@ -100,94 +57,99 @@ class FlutterVoiceEngine {
       musicStateStream;
 
   /// Initialization
-  Future<void> initialize() async {
-    await _channel.invokeMethod('initialize', {
-      'audioConfig': audioConfig.toMap(),
-      'sessionConfig': sessionConfig.toMap(),
-      'processors': [],
-    });
+  Future<void> initialize([
+    AudioConfig? config,
+    AudioSessionConfig? sessionConfig,
+    List<AudioProcessor>? processors,
+  ]) async {
+    if (config != null) audioConfig = config;
+    if (sessionConfig != null) this.sessionConfig = sessionConfig;
+    
+    await _platform.initialize(
+      audioConfig,
+      this.sessionConfig,
+      processors ?? [],
+    );
     isInitialized = true;
   }
 
   /// Recording
   Future<void> startRecording() async {
     if (!isInitialized) throw Exception('VoiceEngine not initialized');
-    await _channel.invokeMethod('startRecording');
+    await _platform.startRecording();
     isRecording = true;
   }
 
   Future<void> stopRecording() async {
     if (!isInitialized || !isRecording) return;
-    await _channel.invokeMethod('stopRecording');
+    await _platform.stopRecording();
     isRecording = false;
   }
 
   Future<void> playAudioChunk(Uint8List data) async {
     if (!isInitialized) throw Exception('VoiceEngine not initialized');
-    await _channel.invokeMethod('playAudioChunk', {'audioData': data});
+    // Convert Uint8List to Base64 string for platform interface
+    final base64String = String.fromCharCodes(data);
+    await _platform.playAudioChunk(base64String);
   }
 
   Future<void> stopPlayback() async {
     if (!isInitialized) return;
-    await _channel.invokeMethod('stopPlayback');
+    await _platform.stopPlayback();
   }
 
-  /// Background Music
-  Future<void> playBackgroundMusic(String source,
-      {bool loop = true}) async {
+  /// Background Music (Platform-specific - may not be available on all platforms)
+  Future<void> playBackgroundMusic(String source, {bool loop = true}) async {
     if (!isInitialized) throw Exception('VoiceEngine not initialized');
-    await _channel.invokeMethod('playBackgroundMusic', {
-      'source': source,
-      'loop': loop,
-    });
+    // This feature may not be available on all platforms (e.g., web)
+    throw UnimplementedError('Background music not supported on this platform');
   }
 
   Future<void> stopBackgroundMusic() async {
     if (!isInitialized) throw Exception('VoiceEngine not initialized');
-    await _channel.invokeMethod('stopBackgroundMusic');
+    throw UnimplementedError('Background music not supported on this platform');
   }
 
   Future<void> seekBackgroundMusic(Duration position) async {
     if (!isInitialized) throw Exception('VoiceEngine not initialized');
-    await _channel.invokeMethod('seekBackgroundMusic', {
-      'position': position.inMilliseconds / 1000.0,
-    });
+    throw UnimplementedError('Background music not supported on this platform');
   }
 
   Future<void> setBackgroundMusicVolume(double volume) async {
     if (!isInitialized) throw Exception('VoiceEngine not initialized');
-    await _channel.invokeMethod('setBackgroundMusicVolume', {
-      'volume': volume,
-    });
+    throw UnimplementedError('Background music not supported on this platform');
   }
 
   Future<double> getBackgroundMusicVolume() async {
     if (!isInitialized) return 1.0;
-    final vol = await _channel.invokeMethod('getBackgroundMusicVolume');
-    return (vol as num).toDouble();
+    throw UnimplementedError('Background music not supported on this platform');
   }
 
-
-  /// Playlist support
+  /// Playlist support (Platform-specific)
   Future<void> setMusicPlaylist(List<String> urls) async {
     if (!isInitialized) throw Exception('VoiceEngine not initialized');
-    await _channel.invokeMethod('setMusicPlaylist', {'urls': urls});
+    throw UnimplementedError('Playlist not supported on this platform');
   }
 
   Future<void> playTrackAtIndex(int index) async {
     if (!isInitialized) throw Exception('VoiceEngine not initialized');
-    await _channel.invokeMethod('playTrackAtIndex', {'index': index});
+    throw UnimplementedError('Playlist not supported on this platform');
   }
 
   /// Shutdown
+  Future<void> shutdown() async {
+    await shutdownAll();
+  }
+
   Future<void> shutdownBot() async {
     if (!isInitialized) return;
-    await _channel.invokeMethod('shutdownBot');
+    // Bot-specific shutdown - may not be applicable on all platforms
+    await shutdown();
   }
 
   Future<void> shutdownAll() async {
     if (!isInitialized) return;
-    await _channel.invokeMethod('shutdownAll');
+    await _platform.shutdown();
     isInitialized = false;
     isRecording = false;
     await _audioChunkController.close();

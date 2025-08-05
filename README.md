@@ -1,6 +1,20 @@
-# FlutterVoiceEngine 🎙️
+# Flutt- 🔇 **Echo Cancellation**: Hardware-based Acoustic Echo Cancellation (AEC) with platform-specific optimizations.
+- 🎵 **Background Music:** Play, seek, pause, loop, and manage playlists with live position and state updates.
+- 🔗 **Flutter Streams:** Audio chunks, music position, playback state, and errors via Dart Streams.
+- 🎚️ **Configurable Audio**: Customize `sampleRate`, `channels`, `bitDepth`, `bufferSize`, and more.
+- 🚨 **Error Handling**: Stream errors to handle issues gracefully.
+- 🛠️ **Extensible**: Fine-grained audio session control and WebSocket integration for bots.
+- 🌐 **Web Support**: Full Web Audio API support for browser-based applications.
 
-A powerful native audio plugin for Android & iOS to build real-time conversational voice bots, background music playback, and advanced audio session management.
+## Platform Support
+
+| Platform | Audio Recording | Audio Playback | Echo Cancellation | Background Music |
+|----------|----------------|----------------|-------------------|------------------|
+| iOS      | ✅             | ✅             | ✅ (Hardware AEC) | ✅               |
+| Android  | ✅             | ✅             | ✅               | ✅               |
+| Web      | ✅             | ✅             | ✅ (Browser AEC)  | ✅               |eEngine 🎙️
+
+A powerful cross-platform audio plugin for Android, iOS, and Web to build real-time conversational voice bots, background music playback, and advanced audio session management.
 
 ## Features
 
@@ -17,8 +31,9 @@ A powerful native audio plugin for Android & iOS to build real-time conversation
 ### Prerequisites
 
 - Flutter 3.0.0 or higher
-- iOS 13.0 or higher
-- Xcode 14 or higher
+- iOS 13.0 or higher (for iOS)
+- Xcode 14 or higher (for iOS development)
+- Modern web browser with Web Audio API support (for web)
 
 ### Installation
 
@@ -37,6 +52,8 @@ flutter pub get
 ```
 
 ### Android Setup
+
+Add microphone permission to `android/app/src/main/AndroidManifest.xml`:
 
 ```xml
 <uses-permission android:name="android.permission.RECORD_AUDIO"/>
@@ -64,6 +81,26 @@ cd ios
 pod install
 cd ..
 ```
+
+### Web Setup
+
+The web platform uses the Web Audio API and requires no additional setup. However, note the following:
+
+1. **Browser Compatibility**: Requires a modern browser with Web Audio API support (Chrome 66+, Firefox 60+, Safari 14.1+, Edge 79+).
+
+2. **HTTPS Requirement**: Due to browser security policies, microphone access requires HTTPS in production. During development, `localhost` is allowed.
+
+3. **User Interaction**: Audio context may be suspended until user interaction (click, tap, etc.) due to browser autoplay policies.
+
+4. **Permissions**: The browser will prompt users for microphone permission when `startRecording()` is called.
+
+**Running on Web:**
+
+```bash
+flutter run -d chrome --web-renderer html
+```
+
+**Note**: Use the `html` renderer for better Web Audio API compatibility.
 
 ### Example Usage
 
