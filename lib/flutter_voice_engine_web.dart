@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:html' as html;
 import 'dart:js' as js;
 import 'dart:js_util' as js_util;
@@ -266,7 +265,7 @@ class FlutterVoiceEngineWebPlugin extends FlutterVoiceEnginePlatform {
   }
 
   @override
-  Future<void> playAudioChunk(String base64String) async {
+  Future<void> playAudioChunk(Uint8List audioData) async {
     try {
       if (!_isInitialized) {
         throw Exception('FlutterVoiceEngine not initialized');
@@ -277,9 +276,6 @@ class FlutterVoiceEngineWebPlugin extends FlutterVoiceEnginePlatform {
         await _audioContext!.callMethod('resume');
       }
 
-      // Decode base64 to audio data
-      final audioData = base64Decode(base64String);
-      
       // Create audio buffer from the data
       final audioBuffer = await _createAudioBufferFromData(audioData);
       

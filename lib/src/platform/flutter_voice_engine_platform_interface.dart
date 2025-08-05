@@ -31,7 +31,7 @@ abstract class FlutterVoiceEnginePlatform extends PlatformInterface {
 
   Future<void> stopRecording();
 
-  Future<void> playAudioChunk(String base64String);
+  Future<void> playAudioChunk(Uint8List audioData);
 
   Future<void> stopPlayback();
 

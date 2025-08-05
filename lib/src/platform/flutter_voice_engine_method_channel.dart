@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -107,7 +108,9 @@ class MethodChannelFlutterVoiceEngine extends FlutterVoiceEnginePlatform {
   }
 
   @override
-  Future<void> playAudioChunk(String base64String) async {
+  Future<void> playAudioChunk(Uint8List audioData) async {
+    // Convert to base64 for native platform compatibility
+    final base64String = base64Encode(audioData);
     await methodChannel.invokeMethod('playAudioChunk', {'base64String': base64String});
   }
 

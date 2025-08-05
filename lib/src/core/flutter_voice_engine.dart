@@ -88,9 +88,8 @@ class FlutterVoiceEngine {
 
   Future<void> playAudioChunk(Uint8List data) async {
     if (!isInitialized) throw Exception('VoiceEngine not initialized');
-    // Convert Uint8List to Base64 string for platform interface
-    final base64String = String.fromCharCodes(data);
-    await _platform.playAudioChunk(base64String);
+    // Pass Uint8List directly to platform interface
+    await _platform.playAudioChunk(data);
   }
 
   Future<void> stopPlayback() async {
